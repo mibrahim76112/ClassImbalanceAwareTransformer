@@ -1,12 +1,12 @@
 dataset:
   # Use forward slashes on Windows (or escape backslashes)
-  ff_path: "E:/Freelance Projects/Hussain Project/New_Project/tennessee-eastman-process-simulation-dataset/TEP_FaultFree_Training.RData"
-  ft_path: "E:/Freelance Projects/Hussain Project/New_Project/tennessee-eastman-process-simulation-dataset/TEP_Faulty_Training.RData"
+  ff_path: "/content/TEP_FaultFree_Training.RData"
+  ft_path: "/content/TEP_Faulty_Training.RData"
 
 data_windowing:
   window_size: 100
   stride: 5
-  post_fault_start: 100         # you used 100 in your last snippet
+  post_fault_start: 100         
   train_runs_start: 1
   train_runs_end: 25
   test_runs_start: 26
