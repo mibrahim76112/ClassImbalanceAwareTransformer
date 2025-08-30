@@ -1,0 +1,36 @@
+dataset:
+  # Use forward slashes on Windows (or escape backslashes)
+  ff_path: "E:/Freelance Projects/Hussain Project/New_Project/tennessee-eastman-process-simulation-dataset/TEP_FaultFree_Training.RData"
+  ft_path: "E:/Freelance Projects/Hussain Project/New_Project/tennessee-eastman-process-simulation-dataset/TEP_Faulty_Training.RData"
+
+data_windowing:
+  window_size: 20
+  stride: 5
+  post_fault_start: 100         # you used 100 in your last snippet
+  train_runs_start: 1
+  train_runs_end: 2
+  test_runs_start: 2
+  test_runs_end: 3
+
+training:
+  epochs: 2
+  batch:
+    train: 128
+    val: 64
+    test: 64
+  num_workers: 2
+  seed: 42
+
+model:
+  s: 16.0
+  m: 0.15
+  margin_type: "arc"
+  per_class_margin_overrides:
+    "0": 0.28
+    "15": 0.28
+  center_momentum: 0.95
+  center_sep_K: 3
+  center_sep_margin: 0.28
+  center_pull_weights:
+    "0": 2.5
+    "15": 3.0

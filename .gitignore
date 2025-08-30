@@ -1,0 +1,4 @@
+.venv/
+tennessee-eastman-process-simulation-dataset/
+__pycache__/
+*.json
