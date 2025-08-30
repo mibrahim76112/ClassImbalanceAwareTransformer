@@ -4,20 +4,20 @@ dataset:
   ft_path: "E:/Freelance Projects/Hussain Project/New_Project/tennessee-eastman-process-simulation-dataset/TEP_Faulty_Training.RData"
 
 data_windowing:
-  window_size: 20
+  window_size: 100
   stride: 5
   post_fault_start: 100         # you used 100 in your last snippet
   train_runs_start: 1
-  train_runs_end: 2
-  test_runs_start: 2
-  test_runs_end: 3
+  train_runs_end: 25
+  test_runs_start: 26
+  test_runs_end: 38
 
 training:
-  epochs: 2
+  epochs: 20
   batch:
     train: 128
-    val: 64
-    test: 64
+    val: 256
+    test: 256
   num_workers: 2
   seed: 42
 
