@@ -6,7 +6,6 @@ import numpy as np
 
 from src.plots import (
     plot_class_dist_and_margins,
-    plot_confusion_matrix_row_norm,
     plot_per_class_bars,
     plot_embedding_with_centers,
     plot_center_similarity,
@@ -80,18 +79,6 @@ def main():
             print("[OK] class_dist_margins.png")
         else:
             print("[SKIP] classdist: y_train.npy not found")
-
-    # 2) Confusion matrix (row-normalized)
-    if "confmat" in wanted:
-        if (y_true is not None) and (y_pred_reg is not None):
-            plot_confusion_matrix_row_norm(
-                y_true, y_pred_reg,
-                save_path=os.path.join(rd, "confmat_row_norm.png"),
-                annotate_threshold=args.annotate_threshold
-            )
-            print("[OK] confmat_row_norm.png")
-        else:
-            print("[SKIP] confmat: need test_y.npy and test_pred_reg.npy")
 
     # 3) Per-class bars (Baseline vs Ours) -> needs a baseline npz
     if "perclass" in wanted:

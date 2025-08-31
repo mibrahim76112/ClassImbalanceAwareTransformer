@@ -99,38 +99,6 @@ def plot_class_dist_and_margins(y_train, model, save_path="results/class_dist_ma
 # 2) Row-normalized confusion matrix (decluttered)
 # ------------------------ #
 
-def plot_confusion_matrix_row_norm(y_true, y_pred, save_path="results/confmat_row_norm.png",
-                                   annotate_threshold=0.02, cmap="Blues"):
-    """
-    Row-normalized CM with annotations only for cells >= annotate_threshold.
-    """
-    _ensure_dir(os.path.dirname(save_path) or ".")
-    labels = np.unique(y_true)
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
-    cm_norm = cm.astype(np.float64) / np.clip(cm.sum(axis=1, keepdims=True), 1, None)
-
-    fig, ax = plt.subplots(figsize=(8,7))
-    im = ax.imshow(cm_norm, interpolation="nearest", cmap=cmap, vmin=0.0, vmax=1.0)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks(np.arange(len(labels)))
-    ax.set_yticks(np.arange(len(labels)))
-    ax.set_xticklabels(labels, rotation=90)
-    ax.set_yticklabels(labels)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
-    ax.set_title("Confusion Matrix (row-normalized)")
-
-    # annotate
-    for i in range(len(labels)):
-        for j in range(len(labels)):
-            v = cm_norm[i, j]
-            if v >= annotate_threshold:
-                ax.text(j, i, f"{v:.2f}", ha='center', va='center', fontsize=7)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close(fig)
-    return cm, cm_norm
 
 # ------------------------ #
 # 3) Per-class bars (Baseline vs Ours)
