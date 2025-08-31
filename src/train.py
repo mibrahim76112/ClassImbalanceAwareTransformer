@@ -1,7 +1,6 @@
 import os
 import json
 import warnings
-import torch.nn.functional as F
 
 warnings.filterwarnings("ignore", message=".*pin_memory.*")
 warnings.filterwarnings("ignore", message=".*enable_nested_tensor is True.*")
@@ -47,6 +46,8 @@ def parse_args():
     p.add_argument("--stride", type=int, default=None)
     p.add_argument("--post-fault-start", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--results-dir", type=str, default=None,
+               help="Where to save artifacts (overrides YAML)")
     return p.parse_args()
 
 def set_seed(seed: int):
@@ -64,6 +65,8 @@ def main():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
 
+    results_dir = args.results_dir or cfg.get("training", {}).get("results_dir", "results")
+    os.makedirs(results_dir, exist_ok=True)
     # ---- Resolve params (CLI overrides > config)
     seed = args.seed or cfg["training"]["seed"]
     set_seed(seed)
@@ -172,6 +175,17 @@ def main():
 
     # ---- Train
     best_bal_acc, best_state = 0.0, None
+    history = {
+        "epoch": [],
+        "train_ce": [],
+        "train_supcon": [],
+
+        "lambda_supcon": [],
+        "val_acc": [],
+        "val_bal_acc": [],
+        "val_macro_f1": []
+    }
+
     for epoch in range(1, epochs + 1):
         ce, con, lam = train_one_epoch(
             model, train_loader, opt, device, class_counts,
@@ -184,6 +198,14 @@ def main():
         val = evaluate(model, val_loader, device)
         print(f"[{epoch:02d}] λ:{lam:.3f} CE:{ce:.4f} Con:{con:.4f} "
               f"Acc:{val['acc']:.3f} BalAcc:{val['bal_acc']:.3f} F1:{val['macro_f1']:.3f}")
+        history["epoch"].append(epoch)
+        history["train_ce"].append(ce)
+        history["train_supcon"].append(con)
+        history["lambda_supcon"].append(lam)
+        history["val_acc"].append(val["acc"])
+        history["val_bal_acc"].append(float(val["bal_acc"]))
+        history["val_macro_f1"].append(val["macro_f1"])
+
 
         if val["bal_acc"] > best_bal_acc:
             best_bal_acc = val["bal_acc"]
@@ -192,43 +214,51 @@ def main():
     # ---- Test
     if best_state:
         model.load_state_dict(best_state)
+        torch.save(best_state, os.path.join(results_dir, "best_state_dict.pt"))
+
 
     print("=== TEST (best regular) ===")
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
 
-    # Save full dicts to file instead of printing
-    os.makedirs("results", exist_ok=True)
-    with open("results/test_metrics.json", "w") as f:
+
+    # ---------- Save artifacts ----------
+    # test metrics as JSON
+    with open(os.path.join(results_dir, "test_metrics.json"), "w") as f:
         json.dump(test_m, f, indent=2, default=lambda x: float(x))
 
-        os.makedirs("results", exist_ok=True)
+    # training history for loss/curve plots
+    # (np.savez handles lists; plots.py reads this back)
+    np.savez(os.path.join(results_dir, "history.npz"), **history)
 
-    # predictions + logits on test set (regular forward)
+    # predictions + logits on test set (for CM and optional calibration)
     y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
-    np.save(os.path.join("results", "test_y.npy"), y_true)
-    np.save(os.path.join("results", "test_pred_reg.npy"), y_pred)
-    np.save(os.path.join("results", "test_logits_reg.npy"), logits)
+    np.save(os.path.join(results_dir, "test_y.npy"), y_true)
+    np.save(os.path.join(results_dir, "test_pred_reg.npy"), y_pred)
+    np.save(os.path.join(results_dir, "test_logits_reg.npy"), logits)
 
-    # optional: save training labels (class distribution plot)
+    # optional: save training labels for class-dist plot
     try:
-        np.save(os.path.join("results", "y_train.npy"), y_train)
+        np.save(os.path.join(results_dir, "y_train.npy"), y_train)
     except Exception:
         pass
 
-    # optional: save feature embeddings & centers if available
+    # optional: save features (for embedding) and centers
     try:
         feats, y_all = get_features(model, test_loader, device)
-        np.save(os.path.join("results", "test_feats.npy"), feats)
-        np.save(os.path.join("results", "test_y.npy"), y_all)  # overwrite with same y_true (ok)
+        np.save(os.path.join(results_dir, "test_feats.npy"), feats)
+        # y_all should equal y_true; saving again is fine
+        np.save(os.path.join(results_dir, "test_y.npy"), y_all)
     except Exception:
         pass
 
     try:
         if hasattr(centers, "centers"):
-            np.save(os.path.join("results", "centers.npy"), centers.centers.detach().cpu().numpy())
+            np.save(os.path.join(results_dir, "centers.npy"),
+                    centers.centers.detach().cpu().numpy())
     except Exception:
         pass
+
 
 
 
