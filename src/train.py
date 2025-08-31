@@ -19,7 +19,8 @@ from .datasets import (TwoCropsTransform, TSJitter, TSScale, TSTimeMask,
 from .model import SelfGatedHierarchicalTransformerEncoder, CosineMarginClassifier
 from .proto import PrototypeCenters, CenterSeparationLoss
 from .losses import train_one_epoch
-from .metrics import evaluate, evaluate_tta
+from .metrics import evaluate
+from src.plots import get_preds_and_logits, get_features  
 
 
 
@@ -196,16 +197,39 @@ def main():
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
 
-    print("=== TEST (best TTA) ===")
-    test_tta_m = evaluate_tta(model, test_loader, device, K=8)
-    pretty_print_metrics("TEST_TTA", test_tta_m)
-
     # Save full dicts to file instead of printing
     os.makedirs("results", exist_ok=True)
     with open("results/test_metrics.json", "w") as f:
         json.dump(test_m, f, indent=2, default=lambda x: float(x))
-    with open("results/test_metrics_tta.json", "w") as f:
-        json.dump(test_tta_m, f, indent=2, default=lambda x: float(x))
+
+        os.makedirs("results", exist_ok=True)
+
+    # predictions + logits on test set (regular forward)
+    y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
+    np.save(os.path.join("results", "test_y.npy"), y_true)
+    np.save(os.path.join("results", "test_pred_reg.npy"), y_pred)
+    np.save(os.path.join("results", "test_logits_reg.npy"), logits)
+
+    # optional: save training labels (class distribution plot)
+    try:
+        np.save(os.path.join("results", "y_train.npy"), y_train)
+    except Exception:
+        pass
+
+    # optional: save feature embeddings & centers if available
+    try:
+        feats, y_all = get_features(model, test_loader, device)
+        np.save(os.path.join("results", "test_feats.npy"), feats)
+        np.save(os.path.join("results", "test_y.npy"), y_all)  # overwrite with same y_true (ok)
+    except Exception:
+        pass
+
+    try:
+        if hasattr(centers, "centers"):
+            np.save(os.path.join("results", "centers.npy"), centers.centers.detach().cpu().numpy())
+    except Exception:
+        pass
+
 
 
 if __name__ == "__main__":
