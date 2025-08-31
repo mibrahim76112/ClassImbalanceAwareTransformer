@@ -1,19 +1,18 @@
 dataset:
-  # Use forward slashes on Windows (or escape backslashes)
   ff_path: "/content/TEP_FaultFree_Training.RData"
   ft_path: "/content/TEP_Faulty_Training.RData"
 
 data_windowing:
-  window_size: 5
-  stride: 4
+  window_size: 100
+  stride: 5
   post_fault_start: 100         
   train_runs_start: 1
-  train_runs_end: 2
-  test_runs_start: 2
-  test_runs_end: 3
+  train_runs_end: 25
+  test_runs_start: 26
+  test_runs_end: 38
 
 training:
-  epochs: 2
+  epochs: 100
   batch:
     train: 128
     val: 256
