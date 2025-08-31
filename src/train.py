@@ -10,7 +10,15 @@ from pathlib import Path
 import yaml
 import numpy as np
 import torch
+import torch.nn.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
+
+# Optional: SMOTE for data-level balancing
+try:
+    from imblearn.over_sampling import SMOTE
+    IMB_AVAILABLE = True
+except Exception:
+    IMB_AVAILABLE = False
 
 from .data import load_sampled_data
 from .datasets import (TwoCropsTransform, TSJitter, TSScale, TSTimeMask,
@@ -19,8 +27,7 @@ from .model import SelfGatedHierarchicalTransformerEncoder, CosineMarginClassifi
 from .proto import PrototypeCenters, CenterSeparationLoss
 from .losses import train_one_epoch
 from .metrics import evaluate
-from src.plots import get_preds_and_logits, get_features  
-
+from src.plots import get_preds_and_logits, get_features
 
 
 def pretty_print_metrics(tag, m):
@@ -29,6 +36,7 @@ def pretty_print_metrics(tag, m):
     bal = m.get("bal_acc", None)
     f1  = m.get("macro_f1", None)
     print(f"{tag}: Acc={acc:.3f} | BalAcc={float(bal):.3f} | MacroF1={f1:.3f}")
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="TEP classifier training (config-driven)")
@@ -48,12 +56,44 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--results-dir", type=str, default=None,
                help="Where to save artifacts (overrides YAML)")
+
+    # Baseline switch: use ONLY linear classifier (no cosine head, no contrastive, no centers)
+    p.add_argument("--baseline", action="store_true",
+                   help="Use only the linear classifier (no cosine head / contrastive / centers)")
+
+    # SMOTE controls (data-level rebalancing on TRAIN windows only)
+    p.add_argument("--smote", action="store_true",
+                   help="Apply SMOTE to training windows after split (avoid using WeightedRandomSampler then)")
+    p.add_argument("--smote-ratio", type=float, default=None,
+                   help="Target per-class size as a fraction of the majority (e.g., 0.5). If omitted, upsample minorities to majority.")
+
     return p.parse_args()
 
 def set_seed(seed: int):
     import random
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+
+
+# ------------------------
+# Plain CE training (baseline)
+# ------------------------
+
+def train_one_epoch_ce(model, loader, opt, device):
+    model.train()
+    tot, tot_loss = 0, 0.0
+    for batch in loader:
+        if isinstance(batch, (list, tuple)):
+            x, y = batch[0], batch[1]
+        else:
+            x, y = batch
+        x, y = x.to(device), y.to(device)
+        logits = model(x)
+        loss = F.cross_entropy(logits, y)
+        opt.zero_grad(); loss.backward(); opt.step()
+        bs = y.size(0); tot += bs; tot_loss += loss.item() * bs
+    return tot_loss / max(1, tot)
+
 
 def main():
     args = parse_args()
@@ -87,7 +127,7 @@ def main():
     test_bs     = args.test_batch or cfg["training"]["batch"]["test"]
     num_workers = args.num_workers or cfg["training"]["num_workers"]
 
-    # ---- Data
+    # ---- Data load
     (X_train, y_train, _), (X_test, y_test, _) = load_sampled_data(
         window_size=window_size, stride=stride, ff_path=ff_path, ft_path=ft_path,
         post_fault_start=post_fault_start, train_runs=train_runs, test_runs=test_runs
@@ -98,20 +138,63 @@ def main():
     X_tr, y_tr = X_train[train_idx], y_train[train_idx]
     X_val, y_val = X_train[val_idx], y_train[val_idx]
 
-    two_crops = TwoCropsTransform(
-        weak_tfms=[TSJitter(0.0005), TSScale(0.99, 1.01)],
-        strong_tfms=[TSJitter(0.001), TSScale(0.98, 1.02), TSTimeMask(0.10)]
-    )
-    train_ds = ContrastiveTSDataset(X_tr, y_tr, two_crops)
-    sampler, class_counts = make_sampler(y_tr)
+    # ---- Optional SMOTE on TRAIN windows only
+    use_weighted_sampler = True
+    if args.smote:
+        if not IMB_AVAILABLE:
+            raise ImportError("imblearn not available. Install with: pip install imbalanced-learn")
 
+        counts = np.bincount(y_tr.astype(int))
+        majority = counts.max()
+        uniq = np.unique(y_tr)
+
+        if args.smote_ratio is None:
+            sampling_strategy = "not majority"  # upsample all minorities to majority
+            target_descr = f"to majority ({majority})"
+        else:
+            target = max(1, int(round(majority * float(args.smote_ratio))))
+            sampling_strategy = {int(c): target for c in uniq if counts[int(c)] < target}
+            target_descr = f"to ratio {args.smote_ratio} × majority (~{target})"
+
+        # k_neighbors must be < class count for each minority
+        min_minority = counts[counts > 0].min()
+        k_neighbors = max(1, min(5, int(min_minority) - 1))
+        print(f"[SMOTE] Upsampling minorities {target_descr}; k_neighbors={k_neighbors}")
+
+        N, T, F = X_tr.shape
+        X2d = X_tr.reshape(N, T * F).astype(np.float32)
+        sm = SMOTE(sampling_strategy=sampling_strategy, k_neighbors=k_neighbors, random_state=seed)
+        X_res, y_res = sm.fit_resample(X2d, y_tr)
+        X_tr, y_tr = X_res.reshape(-1, T, F), y_res
+
+        use_weighted_sampler = False  # avoid double-balancing
+
+    # ---- Datasets
     use_cuda = torch.cuda.is_available()
-    use_pin_memory = use_cuda  # only true on GPU
+    use_pin_memory = use_cuda
 
-    train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=train_bs, sampler=sampler, drop_last=True,
-        num_workers=num_workers, pin_memory=use_pin_memory
-    )
+    if args.baseline:
+        train_ds = PlainTSDataset(X_tr, y_tr)
+    else:
+        two_crops = TwoCropsTransform(
+            weak_tfms=[TSJitter(0.0005), TSScale(0.99, 1.01)],
+            strong_tfms=[TSJitter(0.001), TSScale(0.98, 1.02), TSTimeMask(0.10)]
+        )
+        train_ds = ContrastiveTSDataset(X_tr, y_tr, two_crops)
+
+    if use_weighted_sampler:
+        sampler, class_counts = make_sampler(y_tr)
+        train_loader = torch.utils.data.DataLoader(
+            train_ds, batch_size=train_bs, sampler=sampler, drop_last=True,
+            num_workers=num_workers, pin_memory=use_pin_memory
+        )
+    else:
+        class_counts = np.bincount(y_tr.astype(int))
+        train_loader = torch.utils.data.DataLoader(
+            train_ds, batch_size=train_bs, shuffle=True, drop_last=True,
+            num_workers=num_workers, pin_memory=use_pin_memory
+        )
+
     val_loader = torch.utils.data.DataLoader(
         PlainTSDataset(X_val, y_val), batch_size=val_bs, shuffle=False,
         num_workers=num_workers, pin_memory=use_pin_memory
@@ -121,7 +204,6 @@ def main():
         num_workers=num_workers, pin_memory=use_pin_memory
     )
 
-
     # ---- Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -130,48 +212,55 @@ def main():
         input_dim=X_train.shape[2], num_classes=int(y_train.max())+1
     ).to(device)
 
-    num_classes = model.classifier[-1].out_features
-    with torch.no_grad():
-        x0 = next(iter(train_loader))[0].to(device)
-        feat_dim = model.forward_features(x0).shape[-1]
+    if args.baseline:
+        # Plain optimizer over the whole model (linear classifier inside)
+        opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    else:
+        # Add cosine-margin head + prototype centers path
+        with torch.no_grad():
+            # For contrastive dataset, batch[0] is the original view x
+            first_batch = next(iter(train_loader))
+            x0 = first_batch[0] if isinstance(first_batch, (list, tuple)) else first_batch
+            x0 = x0.to(device)
+            feat_dim = model.forward_features(x0).shape[-1]
 
-    model.cos_head = CosineMarginClassifier(
-        feat_dim=feat_dim, num_classes=num_classes,
-        s=float(cfg["model"]["s"]), m=float(cfg["model"]["m"]),
-        margin_type=str(cfg["model"]["margin_type"])
-    ).to(device)
+        num_classes = model.classifier[-1].out_features
+        model.cos_head = CosineMarginClassifier(
+            feat_dim=feat_dim, num_classes=num_classes,
+            s=float(cfg["model"]["s"]), m=float(cfg["model"]["m"]),
+            margin_type=str(cfg["model"]["margin_type"])
+        ).to(device)
 
-    # per-class margin overrides from config (keys are strings)
-    per_m = torch.full((num_classes,), float(cfg["model"]["m"]), device=device)
-    for k, v in (cfg.get("model", {}).get("per_class_margin_overrides", {}) or {}).items():
-        idx = int(k)
-        if idx < num_classes:
-            per_m[idx] = float(v)
-    model.cos_head.per_class_margin = per_m
+        # per-class margin overrides from config
+        per_m = torch.full((num_classes,), float(cfg["model"]["m"]), device=device)
+        for k, v in (cfg.get("model", {}).get("per_class_margin_overrides", {}) or {}).items():
+            idx = int(k)
+            if idx < num_classes:
+                per_m[idx] = float(v)
+        model.cos_head.per_class_margin = per_m
 
-    centers = PrototypeCenters(
-        num_classes=num_classes, feat_dim=feat_dim,
-        momentum=float(cfg["model"]["center_momentum"]), device=device
-    ).to(device)
+        centers = PrototypeCenters(
+            num_classes=num_classes, feat_dim=feat_dim,
+            momentum=float(cfg["model"]["center_momentum"]), device=device
+        ).to(device)
 
-    # per-class center pull weights
-    per_class_center_w = torch.ones(num_classes, device=device)
-    for k, v in (cfg.get("model", {}).get("center_pull_weights", {}) or {}).items():
-        idx = int(k)
-        if idx < num_classes:
-            per_class_center_w[idx] = float(v)
+        # per-class center pull weights
+        per_class_center_w = torch.ones(num_classes, device=device)
+        for k, v in (cfg.get("model", {}).get("center_pull_weights", {}) or {}).items():
+            idx = int(k)
+            if idx < num_classes:
+                per_class_center_w[idx] = float(v)
 
-    center_sep = CenterSeparationLoss(
-        K=int(cfg["model"]["center_sep_K"]),
-        margin=float(cfg["model"]["center_sep_margin"])
-    ).to(device)
+        center_sep = CenterSeparationLoss(
+            K=int(cfg["model"]["center_sep_K"]),
+            margin=float(cfg["model"]["center_sep_margin"])
+        ).to(device)
 
-    # ---- Optimizer
-    opt = torch.optim.AdamW([
-        {"params": [p for n,p in model.named_parameters() if not n.startswith("cos_head.")],
-         "lr": 3e-4, "weight_decay": 1e-4},
-        {"params": [model.cos_head.W], "lr": 3e-4, "weight_decay": 5e-5},
-    ], lr=3e-4, weight_decay=0.0)
+        opt = torch.optim.AdamW([
+            {"params": [p for n,p in model.named_parameters() if not n.startswith("cos_head.")],
+             "lr": 3e-4, "weight_decay": 1e-4},
+            {"params": [model.cos_head.W], "lr": 3e-4, "weight_decay": 5e-5},
+        ], lr=3e-4, weight_decay=0.0)
 
     # ---- Train
     best_bal_acc, best_state = 0.0, None
@@ -179,7 +268,6 @@ def main():
         "epoch": [],
         "train_ce": [],
         "train_supcon": [],
-
         "lambda_supcon": [],
         "val_acc": [],
         "val_bal_acc": [],
@@ -187,13 +275,17 @@ def main():
     }
 
     for epoch in range(1, epochs + 1):
-        ce, con, lam = train_one_epoch(
-            model, train_loader, opt, device, class_counts,
-            base_lambda=0.5, epoch=epoch, total_epochs=epochs,
-            mixup_alpha=0.4, mixup_prob=0.35,
-            centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
-            center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12
-        )
+        if args.baseline:
+            ce = train_one_epoch_ce(model, train_loader, opt, device)
+            con, lam = 0.0, 0.0
+        else:
+            ce, con, lam = train_one_epoch(
+                model, train_loader, opt, device, class_counts,
+                base_lambda=0.5, epoch=epoch, total_epochs=epochs,
+                mixup_alpha=0.4, mixup_prob=0.35,
+                centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
+                center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12
+            )
 
         val = evaluate(model, val_loader, device)
         print(f"[{epoch:02d}] λ:{lam:.3f} CE:{ce:.4f} Con:{con:.4f} "
@@ -206,7 +298,6 @@ def main():
         history["val_bal_acc"].append(float(val["bal_acc"]))
         history["val_macro_f1"].append(val["macro_f1"])
 
-
         if val["bal_acc"] > best_bal_acc:
             best_bal_acc = val["bal_acc"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
@@ -216,11 +307,9 @@ def main():
         model.load_state_dict(best_state)
         torch.save(best_state, os.path.join(results_dir, "best_state_dict.pt"))
 
-
     print("=== TEST (best regular) ===")
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
-
 
     # ---------- Save artifacts ----------
     # test metrics as JSON
@@ -228,14 +317,16 @@ def main():
         json.dump(test_m, f, indent=2, default=lambda x: float(x))
 
     # training history for loss/curve plots
-    # (np.savez handles lists; plots.py reads this back)
     np.savez(os.path.join(results_dir, "history.npz"), **history)
 
     # predictions + logits on test set (for CM and optional calibration)
-    y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
-    np.save(os.path.join(results_dir, "test_y.npy"), y_true)
-    np.save(os.path.join(results_dir, "test_pred_reg.npy"), y_pred)
-    np.save(os.path.join(results_dir, "test_logits_reg.npy"), logits)
+    try:
+        y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
+        np.save(os.path.join(results_dir, "test_y.npy"), y_true)
+        np.save(os.path.join(results_dir, "test_pred_reg.npy"), y_pred)
+        np.save(os.path.join(results_dir, "test_logits_reg.npy"), logits)
+    except Exception:
+        pass
 
     # optional: save training labels for class-dist plot
     try:
@@ -247,19 +338,17 @@ def main():
     try:
         feats, y_all = get_features(model, test_loader, device)
         np.save(os.path.join(results_dir, "test_feats.npy"), feats)
-        # y_all should equal y_true; saving again is fine
         np.save(os.path.join(results_dir, "test_y.npy"), y_all)
     except Exception:
         pass
 
     try:
-        if hasattr(centers, "centers"):
-            np.save(os.path.join(results_dir, "centers.npy"),
-                    centers.centers.detach().cpu().numpy())
+        if hasattr(model, "cos_head"):
+            if hasattr(locals().get("centers", None), "centers"):
+                np.save(os.path.join(results_dir, "centers.npy"),
+                        centers.centers.detach().cpu().numpy())
     except Exception:
         pass
-
-
 
 
 if __name__ == "__main__":
