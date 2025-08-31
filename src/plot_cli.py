@@ -1,9 +1,9 @@
 # src/plot_cli.py
 import os, argparse, warnings, numpy as np
 from src.plots import (
-    plot_class_dist_and_margins, plot_confusion_matrix_row_norm, plot_per_class_bars,
+    plot_class_dist_and_margins, plot_per_class_bars,
     plot_embedding, plot_center_similarity, plot_inter_intra_distributions,
-    plot_learning_curves
+    plot_validation_metrics,plot_ce_loss
 )
 
 def _p(path): return os.path.abspath(path)
@@ -12,9 +12,13 @@ def _exists(p): return p is not None and os.path.exists(p)
 def main():
     ap = argparse.ArgumentParser(description="Paper plots CLI (no-reliability)")
     ap.add_argument("--results-dir", default="results", help="folder where train.py saved artifacts")
-    ap.add_argument("--plots", nargs="+",
-                    default=["confmat","classdist","centers","embed","interintra","curves","losses"],
-                    choices=["confmat","perclass","classdist","centers","embed","interintra","curves","losses","all"])
+    ap.add_argument(
+        "--plots", nargs="+",
+        default=["confmat","classdist","centers","embed","interintra","celoss","valmetrics"],
+        choices=["confmat","perclass","classdist","centers","embed","interintra","celoss","valmetrics","all"],
+        help="Which plots to make"
+    )
+
     ap.add_argument("--annotate-threshold", type=float, default=0.02)
     ap.add_argument("--suppress-warnings", action="store_true")
     ap.add_argument("--umap", action="store_true")
@@ -40,7 +44,8 @@ def main():
 
     wanted = set(args.plots)
     if "all" in wanted:
-        wanted = {"confmat","classdist","centers","embed","interintra","curves","losses"}
+        wanted = {"confmat","classdist","centers","embed","interintra","celoss","valmetrics"}
+
 
     if "classdist" in wanted:
         class _Dummy: pass
@@ -51,16 +56,6 @@ def main():
         else:
             print("[SKIP] classdist: y_train.npy not found")
 
-    if "confmat" in wanted:
-        if y_true is not None and y_pred is not None:
-            plot_confusion_matrix_row_norm(
-                y_true, y_pred,
-                save_path=os.path.join(rd,"confmat_row_norm.png"),
-                annotate_threshold=args.annotate_threshold
-            )
-            print("[OK] confmat_row_norm.png")
-        else:
-            print("[SKIP] confmat: need test_y.npy and test_pred_reg.npy")
 
     if "embed" in wanted:
         if feats is not None and y_true is not None:
@@ -85,14 +80,26 @@ def main():
         else:
             print("[SKIP] interintra: need test_feats.npy, centers.npy, test_y.npy")
 
-    if "curves" in wanted or "losses" in wanted:
-        if _exists(hist_path):
+    if "celoss" in wanted:
+        if os.path.exists(hist_path):
             h = np.load(hist_path, allow_pickle=True)
             history = {k: h[k].tolist() for k in h.files}
-            plot_learning_curves(history, save_path=os.path.join(rd,"learning_curves.png"))
-            print("[OK] learning_curves.png")
+            from src.plots import plot_ce_loss
+            plot_ce_loss(history, save_path=os.path.join(rd, "ce_loss.png"))
+            print("[OK] ce_loss.png")
         else:
-            print("[SKIP] curves/losses: history.npz not found")
+            print("[SKIP] celoss: history.npz not found")
+
+    # 7) validation metrics only
+    if "valmetrics" in wanted:
+        if os.path.exists(hist_path):
+            h = np.load(hist_path, allow_pickle=True)
+            history = {k: h[k].tolist() for k in h.files}
+            from src.plots import plot_validation_metrics
+            plot_validation_metrics(history, save_path=os.path.join(rd, "val_metrics.png"))
+            print("[OK] val_metrics.png")
+        else:
+            print("[SKIP] valmetrics: history.npz not found")
 
 if __name__ == "__main__":
     main()

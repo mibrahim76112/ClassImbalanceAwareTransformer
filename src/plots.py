@@ -71,31 +71,6 @@ def plot_class_dist_and_margins(y_train, model,
     plt.title("Class counts and per-class margins")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
-# ---------- 2) Confusion matrix (row-normalized, decluttered) ----------
-def plot_confusion_matrix_row_norm(y_true, y_pred,
-                                   save_path="results/confmat_row_norm.png",
-                                   annotate_threshold=0.02, cmap="Blues"):
-    _ensure_dir(os.path.dirname(save_path) or ".")
-    labels = np.unique(y_true)
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
-    cm_norm = cm.astype(np.float64) / np.clip(cm.sum(axis=1, keepdims=True), 1, None)
-
-    fig, ax = plt.subplots(figsize=(8, 7))
-    im = ax.imshow(cm_norm, interpolation="nearest", cmap=cmap, vmin=0.0, vmax=1.0)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks(np.arange(len(labels))); ax.set_yticks(np.arange(len(labels)))
-    ax.set_xticklabels(labels, rotation=90); ax.set_yticklabels(labels)
-    ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-    ax.set_title("Confusion Matrix (row-normalized)")
-
-    for i in range(len(labels)):
-        for j in range(len(labels)):
-            v = cm_norm[i, j]
-            if v >= annotate_threshold:
-                ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7)
-
-    plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
-    return cm, cm_norm
 
 # ---------- 3) Per-class bars (Baseline vs Ours) ----------
 def per_class_report(y_true, y_pred):
@@ -208,42 +183,60 @@ def plot_inter_intra_distributions(feats, y, centers,
     ax.set_title("Intra vs. Inter-class distance distributions")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
-# ---------- 7) Learning curves (metrics + losses if present) ----------
-def plot_learning_curves(history, save_path="results/learning_curves.png"):
+
+def plot_ce_loss(history, save_path="results/ce_loss.png"):
     """
-    history may contain keys:
-      epoch, train_total, train_ce, train_supcon, train_center, train_center_sep,
-      lambda_supcon, val_acc, val_bal_acc, val_macro_f1
-    Only the ones present will be drawn.
+    Single-panel plot for cross-entropy (train) only.
+    Needs: history['epoch'], history['train_ce']
     """
     _ensure_dir(os.path.dirname(save_path) or ".")
-    ep = history.get("epoch", list(range(1, 1 + max(len(history.get("train_ce", [])),
-                                                    len(history.get("train_supcon", [])),
-                                                    len(history.get("train_total", []))))))
+    ep = history.get("epoch", list(range(1, len(history.get("train_ce", [])) + 1)))
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    for k, label in [
-        ("train_total",      "Train Total Loss"),
-        ("train_ce",         "Train CE"),
-        ("train_supcon",     "Train SupCon"),
-        ("train_center",     "Train Center"),
-        ("train_center_sep", "Train Center-Separation"),
-        ("val_macro_f1",     "Val Macro-F1"),
-        ("val_bal_acc",      "Val BalAcc"),
-        ("val_acc",          "Val Acc"),
-    ]:
-        if k in history:
-            ax.plot(ep, history[k], label=label)
+    fig, ax = plt.subplots(figsize=(8,4))
+    if "train_ce" in history and len(history["train_ce"]):
+        ax.plot(ep, history["train_ce"], label="Train CE")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("CE Loss")
+    ax.set_title("Cross-Entropy Loss")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
 
-    if "lambda_supcon" in history:
-        ax2 = ax.twinx()
-        ax2.plot(ep, history["lambda_supcon"], "k--", alpha=0.6, label=r"$\lambda_{\mathrm{supcon}}$")
-        ax2.set_ylabel(r"$\lambda_{\mathrm{supcon}}$")
-        ax2.legend(loc="lower right")
 
-    ax.set_xlabel("Epoch"); ax.set_ylabel("Value"); ax.set_title("Learning curves")
-    ax.legend(loc="upper left")
-    plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
+def plot_validation_metrics(history, save_path="results/val_metrics.png"):
+    """
+    Validation metrics only (no lambda, no SupCon).
+    Plots any of the available keys: val_acc, val_bal_acc, val_macro_f1.
+    """
+    _ensure_dir(os.path.dirname(save_path) or ".")
+    # pick a sensible x-axis even if some series are missing
+    L = max(
+        len(history.get("val_acc", [])),
+        len(history.get("val_bal_acc", [])),
+        len(history.get("val_macro_f1", [])),
+        1
+    )
+    ep = history.get("epoch", list(range(1, L + 1)))
+
+    fig, ax = plt.subplots(figsize=(9,4.5))
+    if "val_macro_f1" in history and len(history["val_macro_f1"]):
+        ax.plot(ep, history["val_macro_f1"], label="Val Macro-F1")
+    if "val_bal_acc" in history and len(history["val_bal_acc"]):
+        ax.plot(ep, history["val_bal_acc"], label="Val Balanced Acc.")
+    if "val_acc" in history and len(history["val_acc"]):
+        ax.plot(ep, history["val_acc"], label="Val Acc")
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Metric")
+    ax.set_title("Validation Metrics")
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
 
 # ---------- Utilities ----------
 def summarize_metrics(y_true, y_pred):
