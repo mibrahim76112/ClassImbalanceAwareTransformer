@@ -92,7 +92,7 @@ def train_one_epoch(
         t = min(1.0, epoch / max(1, total_epochs // 2))
         model.cos_head.m = float(m_max) * (t ** 2)
 
-    lambda_supcon = base_lambda * (epoch / total_epochs)
+    lambda_supcon = base_lambda * (epoch / 70)
     num_classes = model.cos_head.W.size(0)
 
     ce_sum = con_sum = n_obs = 0

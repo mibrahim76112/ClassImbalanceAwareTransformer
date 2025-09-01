@@ -7,9 +7,9 @@ data_windowing:
   stride: 5
   post_fault_start: 100         
   train_runs_start: 1
-  train_runs_end: 25
-  test_runs_start: 26
-  test_runs_end: 38
+  train_runs_end: 50
+  test_runs_start: 50
+  test_runs_end: 63
 
 training:
   epochs: 100

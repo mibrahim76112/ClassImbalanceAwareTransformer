@@ -41,7 +41,6 @@ def _ensure_dir(p="results"):
     os.makedirs(p, exist_ok=True)
     return p
 
-# ---------- 1) Class distribution vs. margins ----------
 def plot_class_dist_and_margins(y_train, model,
                                 save_path="results/class_dist_margins.png",
                                 highlight=(0, 9, 15)):
@@ -72,7 +71,6 @@ def plot_class_dist_and_margins(y_train, model,
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
 
-# ---------- 3) Per-class bars (Baseline vs Ours) ----------
 def per_class_report(y_true, y_pred):
     rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
     classes = sorted([int(k) for k in rep.keys() if k.isdigit()])
@@ -111,7 +109,6 @@ def plot_per_class_bars(y_true_base, y_pred_base, y_true_ours, y_pred_ours,
 
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
-# ---------- 4) Embedding (no centers) ----------
 def plot_embedding(feats, y, method="umap",
                    save_path="results/embed.png",
                    sample_per_class=800, seed=0):
@@ -147,7 +144,6 @@ def plot_embedding(feats, y, method="umap",
     ax.set_title(f"{method.upper()} embedding")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
-# ---------- 5) Center–center similarity ----------
 def plot_center_similarity(centers, save_path="results/center_similarity.png",
                            title="Center cosine similarity"):
     _ensure_dir(os.path.dirname(save_path) or ".")
@@ -162,7 +158,6 @@ def plot_center_similarity(centers, save_path="results/center_similarity.png",
     ax.set_xticks(np.arange(S.shape[0])); ax.set_yticks(np.arange(S.shape[0]))
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
-# ---------- 6) Intra vs. inter-class distances ----------
 def plot_inter_intra_distributions(feats, y, centers,
                                    save_path="results/inter_intra_distributions.png"):
     _ensure_dir(os.path.dirname(save_path) or ".")
@@ -211,7 +206,6 @@ def plot_validation_metrics(history, save_path="results/val_metrics.png"):
     Plots any of the available keys: val_acc, val_bal_acc, val_macro_f1.
     """
     _ensure_dir(os.path.dirname(save_path) or ".")
-    # pick a sensible x-axis even if some series are missing
     L = max(
         len(history.get("val_acc", [])),
         len(history.get("val_bal_acc", [])),
@@ -238,7 +232,6 @@ def plot_validation_metrics(history, save_path="results/val_metrics.png"):
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
 
-# ---------- Utilities ----------
 def summarize_metrics(y_true, y_pred):
     return {
         "acc": accuracy_score(y_true, y_pred),
