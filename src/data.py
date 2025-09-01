@@ -48,7 +48,7 @@ def sample_train_and_test(
     if type_model == "supervised":
         for i in sorted(train_ts['faultNumber'].unique()):
             if i == 0:
-                frames_train.append(fault_0.iloc[0:1500])
+                frames_train.append(fault_0.iloc[0:22000])
             else:
                 b = train_ts[train_ts['faultNumber'] == i]
                 per = []
@@ -64,7 +64,7 @@ def sample_train_and_test(
     # TEST
     for i in sorted(train_ts['faultNumber'].unique()):
         if i == 0:
-            frames_test.append(fault_0.iloc[1500:1850])
+            frames_test.append(fault_0.iloc[22000:23500])
         else:
             b = train_ts[train_ts['faultNumber'] == i]
             per = []
@@ -129,7 +129,6 @@ def load_sampled_data(*,
         test_runs=test_runs
     )
 
-    # Fit scaler on NORMAL only
     fault_free = tr[tr['faultNumber'] == 0].iloc[:, 3:].values
     if use_gpu and GPU_AVAILABLE:
         scaler = cuStandardScaler(); scaler.fit(cp.asarray(fault_free))

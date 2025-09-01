@@ -1,19 +1,13 @@
 import torch
-import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, classification_report
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    """
-    Evaluation that supports two cases:
-      1) Baseline: model(x) returns logits from the internal linear classifier.
-      2) Cosine head: use model.forward_features(x) -> cos_head(...) for logits.
-    """
     model.eval()
     ys, ps = [], []
+    first = True
     for batch in loader:
-        # robust unpack (works if dataset returns extra views for contrastive setups)
-        if isinstance(batch, (list, tuple)):
+        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
             x, y = batch[0], batch[1]
         else:
             x, y = batch
@@ -23,11 +17,14 @@ def evaluate(model, loader, device):
         if hasattr(model, "cos_head"):
             feats = model.forward_features(x)
             logits = model.cos_head(feats, y=None, use_margin=False)
+            if first: print("[EVAL] using cosine-head logits")
         else:
-            logits = model(x)  # baseline: linear classifier inside the model
+            logits = model(x)
+            if first: print("[EVAL] using linear-head logits")
+        first = False
 
         preds = logits.argmax(dim=1)
-        ys.append(y.cpu()); ps.append(preds.cpu())
+        ys.append(y.detach().cpu()); ps.append(preds.detach().cpu())
 
     y_true = torch.cat(ys).numpy()
     y_pred = torch.cat(ps).numpy()

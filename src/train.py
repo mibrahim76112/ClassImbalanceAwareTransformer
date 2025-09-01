@@ -13,7 +13,6 @@ import torch
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
 
-# Optional: SMOTE for data-level balancing
 try:
     from imblearn.over_sampling import SMOTE
     IMB_AVAILABLE = True
@@ -31,7 +30,6 @@ from src.plots import get_preds_and_logits, get_features
 
 
 def pretty_print_metrics(tag, m):
-    # m: dict from evaluate()
     acc = m.get("acc", None)
     bal = m.get("bal_acc", None)
     f1  = m.get("macro_f1", None)
@@ -42,7 +40,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="TEP classifier training (config-driven)")
     p.add_argument("--config", type=str, default=str(Path(__file__).parent.parent / "config.yaml"),
                    help="Path to config.yaml")
-    # CLI overrides (optional)
     p.add_argument("--ff-path", type=str, default=None)
     p.add_argument("--ft-path", type=str, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -57,11 +54,10 @@ def parse_args():
     p.add_argument("--results-dir", type=str, default=None,
                help="Where to save artifacts (overrides YAML)")
 
-    # Baseline switch: use ONLY linear classifier (no cosine head, no contrastive, no centers)
     p.add_argument("--baseline", action="store_true",
-                   help="Use only the linear classifier (no cosine head / contrastive / centers)")
-
-    # SMOTE controls (data-level rebalancing on TRAIN windows only)
+                help="Use only the linear classifier (no cosine head / contrastive / centers)")
+    p.add_argument("--arcface-only", action="store_true",
+               help="Use cosine-margin head with CE only (disables SupCon and center losses)")
     p.add_argument("--smote", action="store_true",
                    help="Apply SMOTE to training windows after split (avoid using WeightedRandomSampler then)")
     p.add_argument("--smote-ratio", type=float, default=None,
@@ -97,6 +93,9 @@ def train_one_epoch_ce(model, loader, opt, device):
 
 def main():
     args = parse_args()
+    if args.baseline and args.arcface_only:
+        raise ValueError("Choose either --baseline or --arcface-only, not both.")
+
 
     # ---- Load YAML config
     cfg_path = Path(args.config)
@@ -138,7 +137,6 @@ def main():
     X_tr, y_tr = X_train[train_idx], y_train[train_idx]
     X_val, y_val = X_train[val_idx], y_train[val_idx]
 
-    # ---- Optional SMOTE on TRAIN windows only
     use_weighted_sampler = True
     if args.smote:
         if not IMB_AVAILABLE:
@@ -173,7 +171,8 @@ def main():
     use_cuda = torch.cuda.is_available()
     use_pin_memory = use_cuda
 
-    if args.baseline:
+    if args.baseline or args.arcface_only:
+        # single-view, no contrastive crops
         train_ds = PlainTSDataset(X_tr, y_tr)
     else:
         two_crops = TwoCropsTransform(
@@ -204,6 +203,7 @@ def main():
         num_workers=num_workers, pin_memory=use_pin_memory
     )
 
+
     # ---- Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -213,12 +213,9 @@ def main():
     ).to(device)
 
     if args.baseline:
-        # Plain optimizer over the whole model (linear classifier inside)
         opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     else:
-        # Add cosine-margin head + prototype centers path
         with torch.no_grad():
-            # For contrastive dataset, batch[0] is the original view x
             first_batch = next(iter(train_loader))
             x0 = first_batch[0] if isinstance(first_batch, (list, tuple)) else first_batch
             x0 = x0.to(device)
@@ -231,7 +228,7 @@ def main():
             margin_type=str(cfg["model"]["margin_type"])
         ).to(device)
 
-        # per-class margin overrides from config
+        # per-class margin targets (will be warmed up each epoch)
         per_m = torch.full((num_classes,), float(cfg["model"]["m"]), device=device)
         for k, v in (cfg.get("model", {}).get("per_class_margin_overrides", {}) or {}).items():
             idx = int(k)
@@ -239,26 +236,29 @@ def main():
                 per_m[idx] = float(v)
         model.cos_head.per_class_margin = per_m
 
-        centers = PrototypeCenters(
-            num_classes=num_classes, feat_dim=feat_dim,
-            momentum=float(cfg["model"]["center_momentum"]), device=device
-        ).to(device)
+        # Only build centers if NOT arcface-only
+        centers = center_sep = None
+        per_class_center_w = None
+        if not args.arcface_only:
+            centers = PrototypeCenters(
+                num_classes=num_classes, feat_dim=feat_dim,
+                momentum=float(cfg["model"]["center_momentum"]), device=device
+            ).to(device)
 
-        # per-class center pull weights
-        per_class_center_w = torch.ones(num_classes, device=device)
-        for k, v in (cfg.get("model", {}).get("center_pull_weights", {}) or {}).items():
-            idx = int(k)
-            if idx < num_classes:
-                per_class_center_w[idx] = float(v)
+            per_class_center_w = torch.ones(num_classes, device=device)
+            for k, v in (cfg.get("model", {}).get("center_pull_weights", {}) or {}).items():
+                idx = int(k)
+                if idx < num_classes:
+                    per_class_center_w[idx] = float(v)
 
-        center_sep = CenterSeparationLoss(
-            K=int(cfg["model"]["center_sep_K"]),
-            margin=float(cfg["model"]["center_sep_margin"])
-        ).to(device)
+            center_sep = CenterSeparationLoss(
+                K=int(cfg["model"]["center_sep_K"]),
+                margin=float(cfg["model"]["center_sep_margin"])
+            ).to(device)
 
         opt = torch.optim.AdamW([
-            {"params": [p for n,p in model.named_parameters() if not n.startswith("cos_head.")],
-             "lr": 3e-4, "weight_decay": 1e-4},
+            {"params": [p for n, p in model.named_parameters() if not n.startswith("cos_head.")],
+            "lr": 3e-4, "weight_decay": 1e-4},
             {"params": [model.cos_head.W], "lr": 3e-4, "weight_decay": 5e-5},
         ], lr=3e-4, weight_decay=0.0)
 
@@ -273,19 +273,49 @@ def main():
         "val_bal_acc": [],
         "val_macro_f1": []
     }
-
     for epoch in range(1, epochs + 1):
         if args.baseline:
+            # --- BASELINE: linear head + CE only ---
             ce = train_one_epoch_ce(model, train_loader, opt, device)
             con, lam = 0.0, 0.0
+
         else:
-            ce, con, lam = train_one_epoch(
-                model, train_loader, opt, device, class_counts,
-                base_lambda=0.5, epoch=epoch, total_epochs=epochs,
-                mixup_alpha=0.4, mixup_prob=0.35,
-                centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
-                center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12
-            )
+        
+            if hasattr(model, "cos_head"):
+                T_half = max(1, int(0.3 * epochs))        # ~30% warmup
+                warm = min(1.0, (epoch / T_half) ** 2)    # quadratic
+                num_classes = model.classifier[-1].out_features
+                base_m = float(cfg["model"]["m"])
+                per_m = torch.full((num_classes,), base_m, device=device)
+                for k, v in (cfg.get("model", {}).get("per_class_margin_overrides", {}) or {}).items():
+                    idx = int(k)
+                    if idx < num_classes:
+                        per_m[idx] = float(v)
+                model.cos_head.per_class_margin = per_m * warm
+                if epoch == 1:
+                    print("[ARC] margin warmup enabled; targets:", per_m.tolist())
+
+            if getattr(args, "arcface_only", False):
+               
+                ce, con, lam = train_one_epoch(
+                    model, train_loader, opt, device, class_counts,
+                    base_lambda=0.0,
+                    epoch=epoch, total_epochs=epochs,
+                    mixup_alpha=0.0, mixup_prob=0.0,
+                    centers=None, per_class_center_w=None, lambda_center=0.0,
+                    center_sep=None, lambda_center_sep=0.0,
+                    temperature=0.12
+                )
+            else:
+                ce, con, lam = train_one_epoch(
+                    model, train_loader, opt, device, class_counts,
+                    base_lambda=0.5, epoch=epoch, total_epochs=epochs,
+                    mixup_alpha=0.4, mixup_prob=0.35,
+                    centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
+                    center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12
+                )
+
+
 
         val = evaluate(model, val_loader, device)
         print(f"[{epoch:02d}] λ:{lam:.3f} CE:{ce:.4f} Con:{con:.4f} "
@@ -302,7 +332,6 @@ def main():
             best_bal_acc = val["bal_acc"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
-    # ---- Test
     if best_state:
         model.load_state_dict(best_state)
         torch.save(best_state, os.path.join(results_dir, "best_state_dict.pt"))
@@ -311,15 +340,12 @@ def main():
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
 
-    # ---------- Save artifacts ----------
-    # test metrics as JSON
+
     with open(os.path.join(results_dir, "test_metrics.json"), "w") as f:
         json.dump(test_m, f, indent=2, default=lambda x: float(x))
 
-    # training history for loss/curve plots
     np.savez(os.path.join(results_dir, "history.npz"), **history)
 
-    # predictions + logits on test set (for CM and optional calibration)
     try:
         y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
         np.save(os.path.join(results_dir, "test_y.npy"), y_true)
@@ -328,13 +354,11 @@ def main():
     except Exception:
         pass
 
-    # optional: save training labels for class-dist plot
     try:
         np.save(os.path.join(results_dir, "y_train.npy"), y_train)
     except Exception:
         pass
 
-    # optional: save features (for embedding) and centers
     try:
         feats, y_all = get_features(model, test_loader, device)
         np.save(os.path.join(results_dir, "test_feats.npy"), feats)

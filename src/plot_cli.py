@@ -1,4 +1,3 @@
-# src/plot_cli.py
 import os, argparse, warnings, numpy as np
 from src.plots import (
     plot_class_dist_and_margins, plot_per_class_bars,
@@ -90,7 +89,6 @@ def main():
         else:
             print("[SKIP] celoss: history.npz not found")
 
-    # 7) validation metrics only
     if "valmetrics" in wanted:
         if os.path.exists(hist_path):
             h = np.load(hist_path, allow_pickle=True)
