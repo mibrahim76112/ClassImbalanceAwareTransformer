@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
+from src.diffusion_trainer import extract_feature_dataset, train_decision_diffusion
 
 try:
     from imblearn.over_sampling import SMOTE
@@ -261,6 +262,21 @@ def main():
             "lr": 3e-4, "weight_decay": 1e-4},
             {"params": [model.cos_head.W], "lr": 3e-4, "weight_decay": 5e-5},
         ], lr=3e-4, weight_decay=0.0)
+    
+
+        # === Diffusion config ===
+        diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
+        use_diffusion = bool(diff_cfg.get("enabled", False))
+        start_ep = int(diff_cfg.get("start_epoch", 3))
+        synth_ratio = float(diff_cfg.get("synth_ratio", 0.20))
+        diff_epochs = int(diff_cfg.get("epochs", 5))
+        diff_steps_infer = int(diff_cfg.get("steps_infer", 24))
+        diff_width = int(diff_cfg.get("width", 512))
+        diff_depth = int(diff_cfg.get("depth", 3))
+        margin_gate_delta = float(diff_cfg.get("margin_gate_delta", 0.05))
+
+        diffusion_model = None  # will be trained at start_epoch
+
 
     # ---- Train
     best_bal_acc, best_state = 0.0, None
@@ -274,6 +290,24 @@ def main():
         "val_macro_f1": []
     }
     for epoch in range(1, epochs + 1):
+        if use_diffusion and (epoch == start_ep):
+            print("[Diffusion] Preparing feature dataset from frozen encoder...")
+            model.eval()
+            # use real-only, single-view dataset for feature extraction
+            feat_loader = torch.utils.data.DataLoader(
+                PlainTSDataset(X_tr, y_tr), batch_size=val_bs, shuffle=False,
+                num_workers=num_workers, pin_memory=True
+            )
+            with torch.no_grad():
+                Z, Y = extract_feature_dataset(model, feat_loader, device)
+            # train small diffusion on (Z,Y)
+            print("[Diffusion] Training decision-space diffusion...")
+            diffusion_model = train_decision_diffusion(
+                Z, Y, num_classes=int(y_train.max())+1,
+                feat_dim=Z.shape[1], epochs=diff_epochs, bs=1024, lr=1e-3, device=device,
+                T=1000, steps_infer=diff_steps_infer, width=diff_width, depth=diff_depth
+            )
+            model.train()
         if args.baseline:
             # --- BASELINE: linear head + CE only ---
             ce = train_one_epoch_ce(model, train_loader, opt, device)
@@ -298,22 +332,28 @@ def main():
             if getattr(args, "arcface_only", False):
                
                 ce, con, lam = train_one_epoch(
-                    model, train_loader, opt, device, class_counts,
-                    base_lambda=0.0,
-                    epoch=epoch, total_epochs=epochs,
-                    mixup_alpha=0.0, mixup_prob=0.0,
-                    centers=None, per_class_center_w=None, lambda_center=0.0,
-                    center_sep=None, lambda_center_sep=0.0,
-                    temperature=0.12
-                )
+                        model, train_loader, opt, device, class_counts,
+                        base_lambda=0.0,
+                        epoch=epoch, total_epochs=epochs,
+                        mixup_alpha=0.0, mixup_prob=0.0,
+                        centers=None, per_class_center_w=None, lambda_center=0.0,
+                        center_sep=None, lambda_center_sep=0.0,
+                        temperature=0.12,
+                        diffusion_sampler=diffusion_model,
+                        synth_ratio=(synth_ratio if (use_diffusion and diffusion_model is not None and epoch >= start_ep) else 0.0),
+                        margin_gate_delta=margin_gate_delta
+                    )
             else:
                 ce, con, lam = train_one_epoch(
-                    model, train_loader, opt, device, class_counts,
-                    base_lambda=0.5, epoch=epoch, total_epochs=epochs,
-                    mixup_alpha=0.4, mixup_prob=0.35,
-                    centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
-                    center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12
-                )
+                        model, train_loader, opt, device, class_counts,
+                        base_lambda=0.5, epoch=epoch, total_epochs=epochs,
+                        mixup_alpha=0.4, mixup_prob=0.35,
+                        centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
+                        center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12,
+                        diffusion_sampler=diffusion_model,
+                        synth_ratio=(synth_ratio if (use_diffusion and diffusion_model is not None and epoch >= start_ep) else 0.0),
+                        margin_gate_delta=margin_gate_delta
+                    )
 
 
 

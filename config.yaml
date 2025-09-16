@@ -19,6 +19,15 @@ training:
     test: 256
   num_workers: 2
   seed: 42
+  diffusion:
+    enabled: true
+    start_epoch: 3
+    synth_ratio: 0.2      # fraction of steps that include a synthetic mini-step
+    steps_infer: 24
+    epochs: 5             # train diffusion on features
+    width: 512
+    depth: 3
+    margin_gate_delta: 0.05
 
 model:
   s: 16.0
