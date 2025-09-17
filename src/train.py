@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
-from src.diffusion_trainer import extract_feature_dataset, train_decision_diffusion
+from src.diffusion_trainer import train_decision_diffusion_streaming
 
 try:
     from imblearn.over_sampling import SMOTE
@@ -303,24 +303,40 @@ def main():
         "val_macro_f1": []
     }
     for epoch in range(1, epochs + 1):
+        # === STREAMING diffusion training (no giant Z in memory) ===
         if use_diffusion and (epoch == start_ep):
-            print("[Diffusion] Preparing feature dataset from frozen encoder...")
+            print("[Diffusion] Training decision-space diffusion (streaming)...")
             model.eval()
-            # use real-only, single-view dataset for feature extraction
+
+            # Real-only, single-view dataset for feature extraction (no augments)
             feat_loader = torch.utils.data.DataLoader(
-                PlainTSDataset(X_tr, y_tr), batch_size=val_bs, shuffle=False,
-                num_workers=0, pin_memory=True
+                PlainTSDataset(X_tr, y_tr),
+                batch_size=val_bs,
+                shuffle=False,
+                num_workers=0,           # keep light to avoid oversubscription warnings
+                pin_memory=True
             )
-            with torch.no_grad():
-                Z, Y = extract_feature_dataset(model, feat_loader, device)
-            # train small diffusion on (Z,Y)
-            print("[Diffusion] Training decision-space diffusion...")
-            diffusion_model = train_decision_diffusion(
-                Z, Y, num_classes=int(y_train.max())+1,
-                feat_dim=Z.shape[1], epochs=diff_epochs, bs=1024, lr=1e-3, device=device,
-                T=1000, steps_infer=diff_steps_infer, width=diff_width, depth=diff_depth
+
+            # Train a small diffusion in decision space by streaming encoder features
+            diffusion_model = train_decision_diffusion_streaming(
+                model=model,
+                feat_loader=feat_loader,
+                device=device,
+                num_classes=int(y_train.max()) + 1,
+                feat_dim=None,                 # infer from first batch (will use model.project if available)
+                epochs=diff_epochs,
+                bs=1024,
+                lr=1e-3,
+                T=1000,
+                steps_infer=diff_steps_infer,
+                width=diff_width,
+                depth=diff_depth,
+                use_project=True,              # use model.project -> smaller, normalized embeddings
+                amp=True                       # mixed precision for speed/memory
             )
+
             model.train()
+
         if args.baseline:
             # --- BASELINE: linear head + CE only ---
             ce = train_one_epoch_ce(model, train_loader, opt, device)
