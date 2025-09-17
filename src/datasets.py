@@ -31,16 +31,19 @@ class TwoCropsTransform:
         return xw, xs
 
 class ContrastiveTSDataset(Dataset):
-    def __init__(self, X, y, two_crops):
+    def __init__(self, X, y, two_crops=None):
         self.X = torch.from_numpy(X.astype(np.float32))
         self.y = torch.from_numpy(y.astype(np.int64))
-        self.two_crops = two_crops
-    def __len__(self): return len(self.y)
+        self.two_crops = two_crops  # kept for compatibility; won't be used here
+
+    def __len__(self): 
+        return len(self.y)
+
     def __getitem__(self, idx):
-        x = self.X[idx].unsqueeze(0)
+        # Return raw window (C=1 will be added in the loop if needed)
+        x = self.X[idx]      # shape (T, F)
         y = self.y[idx]
-        xw, xs = self.two_crops(x)
-        return x.squeeze(0), y, xw.squeeze(0), xs.squeeze(0)
+        return x, y
 
 class PlainTSDataset(Dataset):
     def __init__(self, X, y):

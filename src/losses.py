@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .datasets import TSJitter, TSScale, TSTimeMask
 
 class LogitAdjustedCrossEntropy(nn.Module):
     """
@@ -113,23 +114,52 @@ def train_one_epoch(
         return ok
 
     ce_sum = con_sum = n_obs = 0
-    for x, y, xw, xs in loader:
-        # --------- NEW: synthetic mini-step (before real step), prob = synth_ratio
+    for batch in loader:
+        # batch may be: (x, y)  OR  (x, y, xw, xs) depending on Dataset
+        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+            x = batch[0]
+            y = batch[1]
+        else:
+            x, y = batch
+
+        # Move raw to device
+        x = x.to(device, non_blocking=True)        # shape (B, T, F)
+        y = y.to(device, non_blocking=True)
+
+        # If dataset already provided views (legacy path), keep them; else create on GPU now
+        if isinstance(batch, (list, tuple)) and len(batch) == 4:
+            # Legacy path: dataset produced xw,xs (likely on CPU) — move them
+            xw = batch[2].to(device, non_blocking=True)
+            xs = batch[3].to(device, non_blocking=True)
+        else:
+            # GPU-side augmentations (same params as before)
+            weak_tfms   = [TSJitter(0.0005), TSScale(0.99, 1.01)]
+            strong_tfms = [TSJitter(0.001), TSScale(0.98, 1.02), TSTimeMask(0.10)]
+
+            xw = x
+            for t in weak_tfms:
+                xw = t(xw)  # runs on GPU
+
+            xs = x
+            for t in strong_tfms:
+                xs = t(xs)  # runs on GPU
+
+        # --------- Synthetic mini-step (keep your diffusion block here, unchanged) ---------
         if (diffusion_sampler is not None) and (synth_ratio > 0.0) and (torch.rand(1).item() < synth_ratio) and (len(minority) > 0):
             Bsyn = min(128, xw.size(0))  # small synthetic step
             ys = torch.tensor(_np.random.choice(minority, size=Bsyn), device=device).long()
+
+            # SAMPLE (no grad), then train head on synthetics (with grad)
             with torch.no_grad():
                 z_syn = diffusion_sampler.ddim_sample(ys, n=Bsyn, steps=None, margin_gate=margin_gate)
-                if z_syn.numel() > 0:
-                    ys = ys[:z_syn.size(0)]
-                    # CE on synthetic embeddings via cosine head
-                    logits_syn = model.cos_head(z_syn, y=ys, use_margin=True)
-                    loss_syn = ce_loss_fn(logits_syn, ys)
-                    optimizer.zero_grad(); loss_syn.backward(); optimizer.step()
+            if z_syn.numel() > 0:
+                ys = ys[:z_syn.size(0)]
+                z_syn = z_syn.to(device=device, dtype=next(model.parameters()).dtype)
+                logits_syn = model.cos_head(z_syn, y=ys, use_margin=True)
+                loss_syn = ce_loss_fn(logits_syn, ys)
+                optimizer.zero_grad(); loss_syn.backward(); optimizer.step()
 
-        # --------- ORIGINAL REAL-BATCH PATH (unchanged)
-        xw, xs, y = xw.to(device), xs.to(device), y.to(device)
-
+        # --------- REAL-BATCH PATH (unchanged below) ---------
         feats_w = model.forward_features(xw)
         feats_s = model.forward_features(xs)
 
@@ -173,5 +203,6 @@ def train_one_epoch(
         ce_sum  += float(loss_ce.detach())  * b
         con_sum += float(loss_con.detach()) * b
         n_obs   += b
+
 
     return ce_sum / max(1, n_obs), con_sum / max(1, n_obs), lambda_supcon

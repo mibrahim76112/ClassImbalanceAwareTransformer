@@ -75,6 +75,16 @@ def set_seed(seed: int):
 # ------------------------
 # Plain CE training (baseline)
 # ------------------------
+def _to_jsonable(x):
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    if isinstance(x, (np.floating, np.integer)):
+        return x.item()
+    if isinstance(x, dict):
+        return {k: _to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_to_jsonable(v) for v in x]
+    return x
 
 def train_one_epoch_ce(model, loader, opt, device):
     model.train()
@@ -169,40 +179,43 @@ def main():
         use_weighted_sampler = False  # avoid double-balancing
 
     # ---- Datasets
+    # ---- Datasets
     use_cuda = torch.cuda.is_available()
     use_pin_memory = use_cuda
 
-    if args.baseline or args.arcface_only:
-        # single-view, no contrastive crops
-        train_ds = PlainTSDataset(X_tr, y_tr)
-    else:
-        two_crops = TwoCropsTransform(
-            weak_tfms=[TSJitter(0.0005), TSScale(0.99, 1.01)],
-            strong_tfms=[TSJitter(0.001), TSScale(0.98, 1.02), TSTimeMask(0.10)]
-        )
-        train_ds = ContrastiveTSDataset(X_tr, y_tr, two_crops)
+    # TRAIN: raw windows only; GPU-side augments will run inside train_one_epoch
+    train_ds = PlainTSDataset(X_tr, y_tr)
 
+    # TRAIN loader: keep workers (and add perf flags)
+    # TRAIN loader: keep workers (and add perf flags)
+    # TRAIN loader: keep workers (and add perf flags)
     if use_weighted_sampler:
         sampler, class_counts = make_sampler(y_tr)
         train_loader = torch.utils.data.DataLoader(
             train_ds, batch_size=train_bs, sampler=sampler, drop_last=True,
-            num_workers=num_workers, pin_memory=use_pin_memory
+            num_workers=num_workers, pin_memory=use_pin_memory,
+            persistent_workers=True, prefetch_factor=2
         )
     else:
         class_counts = np.bincount(y_tr.astype(int))
         train_loader = torch.utils.data.DataLoader(
             train_ds, batch_size=train_bs, shuffle=True, drop_last=True,
-            num_workers=num_workers, pin_memory=use_pin_memory
+            num_workers=num_workers, pin_memory=use_pin_memory,
+            persistent_workers=True, prefetch_factor=2
         )
 
+
+
+    # VAL/TEST loaders: set workers to 0 (light)
     val_loader = torch.utils.data.DataLoader(
         PlainTSDataset(X_val, y_val), batch_size=val_bs, shuffle=False,
-        num_workers=num_workers, pin_memory=use_pin_memory
+        num_workers=0, pin_memory=use_pin_memory
     )
     test_loader = torch.utils.data.DataLoader(
         PlainTSDataset(X_test, y_test), batch_size=test_bs, shuffle=False,
-        num_workers=num_workers, pin_memory=use_pin_memory
+        num_workers=0, pin_memory=use_pin_memory
     )
+
 
 
     # ---- Device
@@ -296,7 +309,7 @@ def main():
             # use real-only, single-view dataset for feature extraction
             feat_loader = torch.utils.data.DataLoader(
                 PlainTSDataset(X_tr, y_tr), batch_size=val_bs, shuffle=False,
-                num_workers=num_workers, pin_memory=True
+                num_workers=0, pin_memory=True
             )
             with torch.no_grad():
                 Z, Y = extract_feature_dataset(model, feat_loader, device)
@@ -382,7 +395,7 @@ def main():
 
 
     with open(os.path.join(results_dir, "test_metrics.json"), "w") as f:
-        json.dump(test_m, f, indent=2, default=lambda x: float(x))
+        json.dump(_to_jsonable(test_m), f, indent=2)
 
     np.savez(os.path.join(results_dir, "history.npz"), **history)
 
