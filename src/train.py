@@ -323,7 +323,7 @@ def main():
                 feat_loader=feat_loader,
                 device=device,
                 num_classes=int(y_train.max()) + 1,
-                feat_dim=None,                 # infer from first batch (will use model.project if available)
+                feat_dim=None,
                 epochs=diff_epochs,
                 bs=1024,
                 lr=1e-3,
@@ -331,9 +331,12 @@ def main():
                 steps_infer=diff_steps_infer,
                 width=diff_width,
                 depth=diff_depth,
-                use_project=True,              # use model.project -> smaller, normalized embeddings
-                amp=True                       # mixed precision for speed/memory
+                use_project=False,          # <<< IMPORTANT: match cos_head input dim
+                amp_enabled=True,
+                microbatch=256,
+                log_every=200
             )
+
 
             model.train()
 
@@ -442,7 +445,6 @@ def main():
                         centers.centers.detach().cpu().numpy())
     except Exception:
         pass
-
 
 if __name__ == "__main__":
     main()

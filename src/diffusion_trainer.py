@@ -111,9 +111,13 @@ def train_decision_diffusion_streaming(
     @torch.no_grad()
     def ddim_sample(y, n=None, steps=None, margin_gate=None):
         y = y.to(device)
-        Zs = _orig_ddim_sample(y=y, steps=steps or steps_infer)  # (B, D)
+        n_eff = int(n) if n is not None else y.size(0)  # default to batch size
+        Zs = _orig_ddim_sample(y=y, n=n_eff, steps=steps or steps_infer)  # <-- pass n!
+        # (Optional) ensure dtype/device match the classifier head
+        Zs = Zs.to(next(model.parameters()).dtype, non_blocking=True)
+
         if margin_gate is not None:
-            ok = margin_gate(Zs, y)
+            ok = margin_gate(Zs, y[:Zs.size(0)])  # guard if gate trims batch
             Zs = Zs[ok]
         return Zs
 
