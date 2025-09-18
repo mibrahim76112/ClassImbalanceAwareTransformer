@@ -18,7 +18,7 @@ def extract_feature_dataset(model, loader, device):
         else:
             x, y = batch
         x = x.to(device, non_blocking=True)
-        # Use projected normalized embeddings if available (smaller & stabler)
+     
         f = model.forward_features(x)
         if hasattr(model, "project"):
             f = model.project(f)
@@ -111,13 +111,13 @@ def train_decision_diffusion_streaming(
     @torch.no_grad()
     def ddim_sample(y, n=None, steps=None, margin_gate=None):
         y = y.to(device)
-        n_eff = int(n) if n is not None else y.size(0)  # default to batch size
-        Zs = _orig_ddim_sample(y=y, n=n_eff, steps=steps or steps_infer)  # <-- pass n!
-        # (Optional) ensure dtype/device match the classifier head
+        n_eff = int(n) if n is not None else y.size(0) 
+        Zs = _orig_ddim_sample(y=y, n=n_eff, steps=steps or steps_infer)  
+     
         Zs = Zs.to(next(model.parameters()).dtype, non_blocking=True)
 
         if margin_gate is not None:
-            ok = margin_gate(Zs, y[:Zs.size(0)])  # guard if gate trims batch
+            ok = margin_gate(Zs, y[:Zs.size(0)])  
             Zs = Zs[ok]
         return Zs
 

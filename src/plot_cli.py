@@ -13,8 +13,8 @@ def main():
     ap.add_argument("--results-dir", default="results", help="folder where train.py saved artifacts")
     ap.add_argument(
         "--plots", nargs="+",
-        default=["confmat","classdist","centers","embed","interintra","celoss","valmetrics"],
-        choices=["confmat","perclass","classdist","centers","embed","interintra","celoss","valmetrics","all"],
+        default=["classdist","centers","embed","interintra","celoss","valmetrics"],
+        choices=["perclass","classdist","centers","embed","interintra","celoss","valmetrics","all"],
         help="Which plots to make"
     )
 
@@ -43,7 +43,7 @@ def main():
 
     wanted = set(args.plots)
     if "all" in wanted:
-        wanted = {"confmat","classdist","centers","embed","interintra","celoss","valmetrics"}
+        wanted = {"classdist","centers","embed","interintra","celoss","valmetrics"}
 
 
     if "classdist" in wanted:

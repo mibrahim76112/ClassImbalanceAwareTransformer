@@ -7,9 +7,9 @@ data_windowing:
   stride: 5
   post_fault_start: 100         
   train_runs_start: 1
-  train_runs_end: 50
-  test_runs_start: 50
-  test_runs_end: 63
+  train_runs_end: 100
+  test_runs_start: 101
+  test_runs_end: 125
 
 training:
   epochs: 100
@@ -22,9 +22,9 @@ training:
   diffusion:
     enabled: true
     start_epoch: 3
-    synth_ratio: 0.2      # fraction of steps that include a synthetic mini-step
+    synth_ratio: 0.2      
     steps_infer: 24
-    epochs: 5             # train diffusion on features
+    epochs: 20          
     width: 512
     depth: 3
     margin_gate_delta: 0.05

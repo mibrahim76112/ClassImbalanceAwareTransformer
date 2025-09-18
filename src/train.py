@@ -117,7 +117,7 @@ def main():
 
     results_dir = args.results_dir or cfg.get("training", {}).get("results_dir", "results")
     os.makedirs(results_dir, exist_ok=True)
-    # ---- Resolve params (CLI overrides > config)
+
     seed = args.seed or cfg["training"]["seed"]
     set_seed(seed)
 
@@ -158,14 +158,13 @@ def main():
         uniq = np.unique(y_tr)
 
         if args.smote_ratio is None:
-            sampling_strategy = "not majority"  # upsample all minorities to majority
+            sampling_strategy = "not majority"  
             target_descr = f"to majority ({majority})"
         else:
             target = max(1, int(round(majority * float(args.smote_ratio))))
             sampling_strategy = {int(c): target for c in uniq if counts[int(c)] < target}
             target_descr = f"to ratio {args.smote_ratio} × majority (~{target})"
 
-        # k_neighbors must be < class count for each minority
         min_minority = counts[counts > 0].min()
         k_neighbors = max(1, min(5, int(min_minority) - 1))
         print(f"[SMOTE] Upsampling minorities {target_descr}; k_neighbors={k_neighbors}")
@@ -176,19 +175,15 @@ def main():
         X_res, y_res = sm.fit_resample(X2d, y_tr)
         X_tr, y_tr = X_res.reshape(-1, T, F), y_res
 
-        use_weighted_sampler = False  # avoid double-balancing
+        use_weighted_sampler = False 
 
     # ---- Datasets
     # ---- Datasets
     use_cuda = torch.cuda.is_available()
     use_pin_memory = use_cuda
 
-    # TRAIN: raw windows only; GPU-side augments will run inside train_one_epoch
     train_ds = PlainTSDataset(X_tr, y_tr)
 
-    # TRAIN loader: keep workers (and add perf flags)
-    # TRAIN loader: keep workers (and add perf flags)
-    # TRAIN loader: keep workers (and add perf flags)
     if use_weighted_sampler:
         sampler, class_counts = make_sampler(y_tr)
         train_loader = torch.utils.data.DataLoader(
@@ -250,7 +245,6 @@ def main():
                 per_m[idx] = float(v)
         model.cos_head.per_class_margin = per_m
 
-        # Only build centers if NOT arcface-only
         centers = center_sep = None
         per_class_center_w = None
         if not args.arcface_only:
@@ -288,7 +282,7 @@ def main():
         diff_depth = int(diff_cfg.get("depth", 3))
         margin_gate_delta = float(diff_cfg.get("margin_gate_delta", 0.05))
 
-        diffusion_model = None  # will be trained at start_epoch
+        diffusion_model = None  
 
 
     # ---- Train
@@ -303,7 +297,7 @@ def main():
         "val_macro_f1": []
     }
     for epoch in range(1, epochs + 1):
-        # === STREAMING diffusion training (no giant Z in memory) ===
+
         if use_diffusion and (epoch == start_ep):
             print("[Diffusion] Training decision-space diffusion (streaming)...")
             model.eval()
@@ -313,11 +307,11 @@ def main():
                 PlainTSDataset(X_tr, y_tr),
                 batch_size=val_bs,
                 shuffle=False,
-                num_workers=0,           # keep light to avoid oversubscription warnings
+                num_workers=0,           
                 pin_memory=True
             )
 
-            # Train a small diffusion in decision space by streaming encoder features
+    
             diffusion_model = train_decision_diffusion_streaming(
                 model=model,
                 feat_loader=feat_loader,
@@ -331,7 +325,7 @@ def main():
                 steps_infer=diff_steps_infer,
                 width=diff_width,
                 depth=diff_depth,
-                use_project=False,          # <<< IMPORTANT: match cos_head input dim
+                use_project=False,        
                 amp_enabled=True,
                 microbatch=256,
                 log_every=200
@@ -341,7 +335,7 @@ def main():
             model.train()
 
         if args.baseline:
-            # --- BASELINE: linear head + CE only ---
+      
             ce = train_one_epoch_ce(model, train_loader, opt, device)
             con, lam = 0.0, 0.0
 

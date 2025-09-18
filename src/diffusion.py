@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# --------- helpers
 def l2_normalize(x, eps=1e-8):
     return x / (x.norm(dim=-1, keepdim=True) + eps)
 
@@ -19,7 +18,7 @@ def timestep_embedding(timesteps, dim):
         emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=1)
     return emb
 
-# --------- epsilon-predictor (tiny MLP), conditioned on class (and optional onset bucket)
+
 class CondEpsPredictor(nn.Module):
     def __init__(self, feat_dim, num_classes, width=512, depth=3, tdim=128, ydim=64, extra_cond_dim=0):
         super().__init__()
@@ -36,7 +35,7 @@ class CondEpsPredictor(nn.Module):
         self.net = nn.Sequential(*layers)
         self.out = nn.Linear(width, feat_dim)
 
-        # small head to predict a margin “goodness” (optional)
+        
         self.margin_head = nn.Sequential(nn.Linear(width, 1), nn.Tanh())
 
     def forward(self, z_noisy, t, y, extra=None):
@@ -49,10 +48,9 @@ class CondEpsPredictor(nn.Module):
             h = torch.cat([z_noisy, te, ye], dim=-1)
         h = self.net(h)
         eps = self.out(h)
-        mg_score = self.margin_head(h)  # (-1..1)
+        mg_score = self.margin_head(h)  
         return eps, mg_score
 
-# --------- variance schedule (cosine)
 def cosine_beta_schedule(T, s=0.008):
     steps = T + 1
     x = torch.linspace(0, T, steps)
@@ -92,7 +90,7 @@ class DecisionSpaceDiffusion(nn.Module):
     def ddim_sample(self, y, n, steps=None, extra=None, margin_gate=None):
         """
         y: (n,) target classes. Returns unit-norm embeddings (n, D).
-        margin_gate: callable(z_hat, y)->Bool mask to accept/reject samples (optional)
+        margin_gate: callable(z_hat, y)->Bool mask to accept/reject samples
         """
         steps = steps or self.num_steps_infer
         device = next(self.model.parameters()).device
@@ -102,10 +100,10 @@ class DecisionSpaceDiffusion(nn.Module):
             eps, _ = self.model(z, ti.expand(n), y, extra=extra)
             a_bar = self.alphas_cumprod[ti]
             z0 = (z - torch.sqrt(1 - a_bar) * eps) / torch.sqrt(a_bar + 1e-8)
-            z = z0  # DDIM (eta=0) step
-            z = l2_normalize(z)  # project back to unit sphere
-        # optional gate
+            z = z0  
+            z = l2_normalize(z) 
+        
         if margin_gate is not None:
-            keep = margin_gate(z, y)  # Bool mask
+            keep = margin_gate(z, y)  
             z = z[keep]
         return z
