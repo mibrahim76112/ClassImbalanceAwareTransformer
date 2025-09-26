@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
 from src.diffusion_trainer import train_decision_diffusion_streaming
+from collections import defaultdict  # NEW
 
 try:
     from imblearn.over_sampling import SMOTE
@@ -178,7 +179,6 @@ def main():
         use_weighted_sampler = False 
 
     # ---- Datasets
-    # ---- Datasets
     use_cuda = torch.cuda.is_available()
     use_pin_memory = use_cuda
 
@@ -199,8 +199,6 @@ def main():
             persistent_workers=True, prefetch_factor=2
         )
 
-
-
     # VAL/TEST loaders: set workers to 0 (light)
     val_loader = torch.utils.data.DataLoader(
         PlainTSDataset(X_val, y_val), batch_size=val_bs, shuffle=False,
@@ -210,8 +208,6 @@ def main():
         PlainTSDataset(X_test, y_test), batch_size=test_bs, shuffle=False,
         num_workers=0, pin_memory=use_pin_memory
     )
-
-
 
     # ---- Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -223,6 +219,7 @@ def main():
 
     if args.baseline:
         opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+        diffusion_model = None
     else:
         with torch.no_grad():
             first_batch = next(iter(train_loader))
@@ -282,8 +279,12 @@ def main():
         diff_depth = int(diff_cfg.get("depth", 3))
         margin_gate_delta = float(diff_cfg.get("margin_gate_delta", 0.05))
 
-        diffusion_model = None  
+        diffusion_model = None   # will be trained later if enabled
 
+    # ---- Augmentation accounting (NEW)
+    gen_counter = defaultdict(int)                 # per-epoch accumulation hook
+    aug_stats = {"per_epoch_synth_counts": [],     # list of lists, length = num_classes
+                 "num_classes": int(y_train.max()) + 1}
 
     # ---- Train
     best_bal_acc, best_state = 0.0, None
@@ -298,7 +299,7 @@ def main():
     }
     for epoch in range(1, epochs + 1):
 
-        if use_diffusion and (epoch == start_ep):
+        if (not args.baseline) and use_diffusion and (epoch == start_ep):
             print("[Diffusion] Training decision-space diffusion (streaming)...")
             model.eval()
 
@@ -311,7 +312,6 @@ def main():
                 pin_memory=True
             )
 
-    
             diffusion_model = train_decision_diffusion_streaming(
                 model=model,
                 feat_loader=feat_loader,
@@ -328,19 +328,17 @@ def main():
                 use_project=False,        
                 amp_enabled=True,
                 microbatch=256,
-                log_every=200
+                log_every=200,
+                gen_counter=gen_counter,  # NEW: wire counter
             )
-
 
             model.train()
 
         if args.baseline:
-      
             ce = train_one_epoch_ce(model, train_loader, opt, device)
             con, lam = 0.0, 0.0
-
         else:
-        
+            # Margin warmup for arcface/cos head
             if hasattr(model, "cos_head"):
                 T_half = max(1, int(0.3 * epochs))        # ~30% warmup
                 warm = min(1.0, (epoch / T_half) ** 2)    # quadratic
@@ -356,7 +354,6 @@ def main():
                     print("[ARC] margin warmup enabled; targets:", per_m.tolist())
 
             if getattr(args, "arcface_only", False):
-               
                 ce, con, lam = train_one_epoch(
                         model, train_loader, opt, device, class_counts,
                         base_lambda=0.0,
@@ -366,7 +363,7 @@ def main():
                         center_sep=None, lambda_center_sep=0.0,
                         temperature=0.12,
                         diffusion_sampler=diffusion_model,
-                        synth_ratio=(synth_ratio if (use_diffusion and diffusion_model is not None and epoch >= start_ep) else 0.0),
+                        synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
                         margin_gate_delta=margin_gate_delta
                     )
             else:
@@ -377,12 +374,11 @@ def main():
                         centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
                         center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12,
                         diffusion_sampler=diffusion_model,
-                        synth_ratio=(synth_ratio if (use_diffusion and diffusion_model is not None and epoch >= start_ep) else 0.0),
+                        synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
                         margin_gate_delta=margin_gate_delta
                     )
 
-
-
+        # Validation
         val = evaluate(model, val_loader, device)
         print(f"[{epoch:02d}] λ:{lam:.3f} CE:{ce:.4f} Con:{con:.4f} "
               f"Acc:{val['acc']:.3f} BalAcc:{val['bal_acc']:.3f} F1:{val['macro_f1']:.3f}")
@@ -398,6 +394,16 @@ def main():
             best_bal_acc = val["bal_acc"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
+        # === NEW: snapshot synthetic counts after each epoch ===
+        if (not args.baseline):
+            C = aug_stats["num_classes"]
+            snap = [0] * C
+            for k, v in gen_counter.items():
+                if 0 <= k < C:
+                    snap[k] = int(v)
+            aug_stats["per_epoch_synth_counts"].append(snap)
+            gen_counter.clear()
+
     if best_state:
         model.load_state_dict(best_state)
         torch.save(best_state, os.path.join(results_dir, "best_state_dict.pt"))
@@ -405,7 +411,6 @@ def main():
     print("=== TEST (best regular) ===")
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
-
 
     with open(os.path.join(results_dir, "test_metrics.json"), "w") as f:
         json.dump(_to_jsonable(test_m), f, indent=2)
@@ -434,11 +439,28 @@ def main():
 
     try:
         if hasattr(model, "cos_head"):
-            if hasattr(locals().get("centers", None), "centers"):
+            if 'centers' in locals() and hasattr(centers, "centers"):
                 np.save(os.path.join(results_dir, "centers.npy"),
                         centers.centers.detach().cpu().numpy())
     except Exception:
         pass
+
+    # ===== NEW: Save training counts and diffusion synthetic counts =====
+    try:
+        train_counts = np.bincount(y_train.astype(int), minlength=int(y_train.max()) + 1)
+        np.save(os.path.join(results_dir, "train_counts.npy"), train_counts)
+
+        if len(aug_stats["per_epoch_synth_counts"]):
+            synth_counts = np.array(aug_stats["per_epoch_synth_counts"]).sum(axis=0)
+        else:
+            synth_counts = np.zeros_like(train_counts)
+        np.save(os.path.join(results_dir, "diffusion_synth_counts.npy"), synth_counts)
+
+        with open(os.path.join(results_dir, "diffusion_aug_stats.json"), "w") as f:
+            json.dump({"per_epoch_synth_counts": aug_stats["per_epoch_synth_counts"],
+                       "num_classes": aug_stats["num_classes"]}, f, indent=2)
+    except Exception as e:
+        print(f"[WARN] Could not save diffusion accounting: {e}")
 
 if __name__ == "__main__":
     main()

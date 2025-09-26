@@ -5,7 +5,7 @@ dataset:
 data_windowing:
   window_size: 100
   stride: 5
-  post_fault_start: 100         
+  post_fault_start: 160         
   train_runs_start: 1
   train_runs_end: 100
   test_runs_start: 101

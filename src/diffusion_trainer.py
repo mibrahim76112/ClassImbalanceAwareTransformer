@@ -1,14 +1,15 @@
-# src/diffusion_trainer.py
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from .diffusion import DecisionSpaceDiffusion, l2_normalize
 from torch import amp
+from collections import defaultdict  
+
 @torch.no_grad()
 def extract_feature_dataset(model, loader, device):
     """
     Old path (kept for small datasets): encodes ALL features into Z (CPU tensor).
-    Avoid for large datasets; prefer train_decision_diffusion_streaming below.
+   
     """
     Z, Y = [], []
     model.eval()
@@ -57,12 +58,21 @@ def train_decision_diffusion_streaming(
     epochs=5, bs=1024, lr=1e-3,
     T=1000, steps_infer=20, width=512, depth=3,
     use_project=True, amp_enabled=True,
-    microbatch=256, log_every=200
+    microbatch=256, log_every=200,
+    gen_counter=None,   
 ):
+    """
+    Streams features from model, trains a decision-space diffusion model,
+    and exposes a counting wrapper around ddpm sampling for per-class synthetic usage.
+    """
     model.eval()
     ddm = None
     opt = None
     scaler = amp.GradScaler('cuda', enabled=amp_enabled)
+
+   
+    if gen_counter is None:
+        gen_counter = defaultdict(int)
 
     step = 0
     for ep in range(1, epochs + 1):
@@ -77,14 +87,14 @@ def train_decision_diffusion_streaming(
                     fb = model.project(fb)
                 zb = F.normalize(fb, dim=-1)  # (B, D)
 
-            # Lazy-init diffusion on first real batch
+        
             if ddm is None:
                 D = zb.shape[1] if feat_dim is None else int(feat_dim)
                 ddm = DecisionSpaceDiffusion(D, num_classes, T=T, num_steps_infer=steps_infer,
                                              width=width, depth=depth).to(device)
                 opt = torch.optim.AdamW(ddm.parameters(), lr=lr, weight_decay=1e-4)
 
-            # Micro-batch to prevent OOM
+        
             B = zb.size(0)
             mb = min(microbatch, B)
             for i in range(0, B, mb):
@@ -106,20 +116,37 @@ def train_decision_diffusion_streaming(
         print(f"[Diffusion] epoch {ep}: loss={tot/max(1,n):.4f}")
 
     ddm.eval()
-    _orig_ddim_sample = ddm.ddim_sample  # save original to avoid recursion
+    _orig_ddim_sample = ddm.ddim_sample  
 
     @torch.no_grad()
     def ddim_sample(y, n=None, steps=None, margin_gate=None):
+        """
+        Wrap original sampler to count **synthetic** class-conditional draws.
+        We count both the attempted draws (y) and attribute kept samples after margin gating.
+        """
         y = y.to(device)
-        n_eff = int(n) if n is not None else y.size(0) 
-        Zs = _orig_ddim_sample(y=y, n=n_eff, steps=steps or steps_infer)  
-     
-        Zs = Zs.to(next(model.parameters()).dtype, non_blocking=True)
+        n_eff = int(n) if n is not None else y.size(0)
 
-        if margin_gate is not None:
-            ok = margin_gate(Zs, y[:Zs.size(0)])  
-            Zs = Zs[ok]
+        # Count attempted draws per class
+        uniq, cnts = torch.unique(y, return_counts=True)
+        for cls, cnt in zip(uniq.tolist(), cnts.tolist()):
+            gen_counter[int(cls)] += int(cnt)
+
+       
+        Zs = _orig_ddim_sample(y=y, n=n_eff, steps=steps or steps_infer, margin_gate=margin_gate)
+
+     
+        kept = Zs.size(0)
+        if kept < y.size(0):
+            tot = int(cnts.sum().item())
+            if tot > 0:
+                for cls, cnt in zip(uniq.tolist(), cnts.tolist()):
+                    share = float(cnt) / float(tot)
+                    adj = int(round(share * kept))
+                    gen_counter[int(cls)] += adj  
+
         return Zs
 
     ddm.ddim_sample = ddim_sample
+    ddm._gen_counter = gen_counter  
     return ddm

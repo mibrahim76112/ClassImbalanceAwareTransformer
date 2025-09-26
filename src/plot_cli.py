@@ -2,7 +2,8 @@ import os, argparse, warnings, numpy as np
 from src.plots import (
     plot_class_dist_and_margins, plot_per_class_bars,
     plot_embedding, plot_center_similarity, plot_inter_intra_distributions,
-    plot_validation_metrics,plot_ce_loss
+    plot_validation_metrics, plot_ce_loss,
+    plot_real_vs_diffusion_counts, plot_effective_training_distribution,  # NEW
 )
 
 def _p(path): return os.path.abspath(path)
@@ -14,7 +15,10 @@ def main():
     ap.add_argument(
         "--plots", nargs="+",
         default=["classdist","centers","embed","interintra","celoss","valmetrics"],
-        choices=["perclass","classdist","centers","embed","interintra","celoss","valmetrics","all"],
+        choices=[
+            "perclass","classdist","centers","embed","interintra","celoss","valmetrics","all",
+            "diffbalance","diffmix"   # NEW
+        ],
         help="Which plots to make"
     )
 
@@ -34,6 +38,8 @@ def main():
     feats_path   = os.path.join(rd, "test_feats.npy")
     centers_path = os.path.join(rd, "centers.npy")
     hist_path    = os.path.join(rd, "history.npz")
+    train_counts_path = os.path.join(rd, "train_counts.npy")                 # NEW
+    diff_synth_path   = os.path.join(rd, "diffusion_synth_counts.npy")       # NEW
 
     y_train = np.load(y_train_path) if _exists(y_train_path) else None
     y_true  = np.load(y_true_path)  if _exists(y_true_path)  else None
@@ -45,7 +51,6 @@ def main():
     if "all" in wanted:
         wanted = {"classdist","centers","embed","interintra","celoss","valmetrics"}
 
-
     if "classdist" in wanted:
         class _Dummy: pass
         dummy = _Dummy(); dummy.cos_head = _Dummy(); dummy.cos_head.per_class_margin = None
@@ -54,7 +59,6 @@ def main():
             print("[OK] class_dist_margins.png")
         else:
             print("[SKIP] classdist: y_train.npy not found")
-
 
     if "embed" in wanted:
         if feats is not None and y_true is not None:
@@ -80,24 +84,43 @@ def main():
             print("[SKIP] interintra: need test_feats.npy, centers.npy, test_y.npy")
 
     if "celoss" in wanted:
-        if os.path.exists(hist_path):
+        if _exists(hist_path):
             h = np.load(hist_path, allow_pickle=True)
             history = {k: h[k].tolist() for k in h.files}
-            from src.plots import plot_ce_loss
             plot_ce_loss(history, save_path=os.path.join(rd, "ce_loss.png"))
             print("[OK] ce_loss.png")
         else:
             print("[SKIP] celoss: history.npz not found")
 
     if "valmetrics" in wanted:
-        if os.path.exists(hist_path):
+        if _exists(hist_path):
             h = np.load(hist_path, allow_pickle=True)
             history = {k: h[k].tolist() for k in h.files}
-            from src.plots import plot_validation_metrics
             plot_validation_metrics(history, save_path=os.path.join(rd, "val_metrics.png"))
             print("[OK] val_metrics.png")
         else:
             print("[SKIP] valmetrics: history.npz not found")
+
+    # ===== NEW: diffusion balancing plots =====
+    if "diffbalance" in wanted:
+        if _exists(train_counts_path) and _exists(diff_synth_path):
+            train_counts = np.load(train_counts_path)
+            synth_counts = np.load(diff_synth_path)
+            plot_real_vs_diffusion_counts(train_counts, synth_counts,
+                                          save_path=os.path.join(rd, "diffusion_balance_counts.png"))
+            print("[OK] diffusion_balance_counts.png")
+        else:
+            print("[SKIP] diffbalance: need train_counts.npy and diffusion_synth_counts.npy")
+
+    if "diffmix" in wanted:
+        if _exists(train_counts_path) and _exists(diff_synth_path):
+            train_counts = np.load(train_counts_path)
+            synth_counts = np.load(diff_synth_path)
+            plot_effective_training_distribution(train_counts, synth_counts,
+                                                 save_path=os.path.join(rd, "diffusion_effective_distribution.png"))
+            print("[OK] diffusion_effective_distribution.png")
+        else:
+            print("[SKIP] diffmix: need train_counts.npy and diffusion_synth_counts.npy")
 
 if __name__ == "__main__":
     main()

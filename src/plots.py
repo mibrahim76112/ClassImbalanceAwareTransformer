@@ -1,4 +1,3 @@
-# src/plots.py
 import os
 import numpy as np
 import torch
@@ -238,3 +237,70 @@ def summarize_metrics(y_true, y_pred):
         "bal_acc": balanced_accuracy_score(y_true, y_pred),
         "macro_f1": f1_score(y_true, y_pred, average="macro"),
     }
+
+# =========================
+# NEW: Diffusion balancing plots
+# =========================
+def plot_real_vs_diffusion_counts(train_counts, synth_counts,
+                                  save_path="results/diffusion_balance_counts.png"):
+    """
+    Side-by-side bars of real (raw) vs. diffusion-synthetic counts per class.
+    'After' = real + synthetic. Highlights how diffusion equalizes classes.
+    """
+    _ensure_dir(os.path.dirname(save_path) or ".")
+    import numpy as np
+
+    C = max(len(train_counts), len(synth_counts))
+    real = np.array(train_counts, dtype=float)
+    synth = np.array(synth_counts, dtype=float)
+    if len(real) < C:  real = np.pad(real, (0, C - len(real)))
+    if len(synth) < C: synth = np.pad(synth, (0, C - len(synth)))
+    after = real + synth
+
+    x = np.arange(C)
+    w = 0.38
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.bar(x - w/2, real,  width=w, label="Real (pre-diffusion)", alpha=0.85)
+    ax.bar(x + w/2, after, width=w, label="After (real + diffusion)", alpha=0.85)
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Counts")
+    ax.set_xticks(x)
+    ax.set_title("Per-class counts: before vs. after diffusion balancing")
+    ax.legend()
+    plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
+
+
+def plot_effective_training_distribution(train_counts, synth_counts,
+                                         save_path="results/diffusion_effective_distribution.png"):
+    """
+    Stacked bars per class: fraction synthetic vs real in the effective training mix.
+    Also overlays the PRE vs POST normalized distributions for comparison.
+    """
+    _ensure_dir(os.path.dirname(save_path) or ".")
+    import numpy as np
+
+    real = np.array(train_counts, dtype=float)
+    synth = np.array(synth_counts, dtype=float)
+    C = max(len(real), len(synth))
+    if len(real) < C:  real = np.pad(real, (0, C - len(real)))
+    if len(synth) < C: synth = np.pad(synth, (0, C - len(synth)))
+    post = real + synth
+
+    pre_pdf  = real / max(1.0, real.sum())
+    post_pdf = post / max(1.0, post.sum())
+
+    x = np.arange(C)
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    ax.bar(x, real,  label="Real", bottom=0.0, alpha=0.85)
+    ax.bar(x, synth, label="Synthetic (diffusion)", bottom=real, alpha=0.85)
+
+    ax2 = ax.twinx()
+    ax2.plot(x, pre_pdf,  marker="o", linewidth=1.75, label="Pre (normalized)")
+    ax2.plot(x, post_pdf, marker="s", linewidth=1.75, label="Post (normalized)")
+
+    ax.set_xlabel("Class"); ax.set_ylabel("Counts")
+    ax2.set_ylabel("Fraction")
+    ax.set_title("Effective training mix: real vs diffusion per class\n(+ normalized pre/post overlays)")
+    ax.legend(loc="upper left")
+    ax2.legend(loc="upper right")
+    plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
