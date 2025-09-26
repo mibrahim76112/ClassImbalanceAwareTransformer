@@ -5,11 +5,11 @@ dataset:
 data_windowing:
   window_size: 100
   stride: 5
-  post_fault_start: 160         
+  post_fault_start: 100         
   train_runs_start: 1
-  train_runs_end: 100
-  test_runs_start: 101
-  test_runs_end: 125
+  train_runs_end: 35
+  test_runs_start: 36
+  test_runs_end: 55
 
 training:
   epochs: 100

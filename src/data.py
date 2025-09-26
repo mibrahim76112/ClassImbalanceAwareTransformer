@@ -48,7 +48,7 @@ def sample_train_and_test(
     if type_model == "supervised":
         for i in sorted(train_ts['faultNumber'].unique()):
             if i == 0:
-                frames_train.append(fault_0.iloc[0:202000])
+                frames_train.append(fault_0.iloc[0:42000])
             else:
                 b = train_ts[train_ts['faultNumber'] == i]
                 per = []
@@ -64,7 +64,7 @@ def sample_train_and_test(
     # TEST
     for i in sorted(train_ts['faultNumber'].unique()):
         if i == 0:
-            frames_test.append(fault_0.iloc[202000:204000])
+            frames_test.append(fault_0.iloc[42000:44000])
         else:
             b = train_ts[train_ts['faultNumber'] == i]
             per = []
