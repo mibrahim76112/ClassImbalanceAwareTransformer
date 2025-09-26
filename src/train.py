@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
 from src.diffusion_trainer import train_decision_diffusion_streaming
-from collections import defaultdict  # NEW
+from collections import defaultdict
 
 try:
     from imblearn.over_sampling import SMOTE
@@ -220,6 +220,7 @@ def main():
     if args.baseline:
         opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
         diffusion_model = None
+        use_diffusion = False
     else:
         with torch.no_grad():
             first_batch = next(iter(train_loader))
@@ -267,7 +268,6 @@ def main():
             {"params": [model.cos_head.W], "lr": 3e-4, "weight_decay": 5e-5},
         ], lr=3e-4, weight_decay=0.0)
     
-
         # === Diffusion config ===
         diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
         use_diffusion = bool(diff_cfg.get("enabled", False))
@@ -278,13 +278,19 @@ def main():
         diff_width = int(diff_cfg.get("width", 512))
         diff_depth = int(diff_cfg.get("depth", 3))
         margin_gate_delta = float(diff_cfg.get("margin_gate_delta", 0.05))
+        autobalance = bool(diff_cfg.get("autobalance", True))  # NEW: default on
 
         diffusion_model = None   # will be trained later if enabled
 
-    # ---- Augmentation accounting (NEW)
+    # ---- Augmentation accounting
     gen_counter = defaultdict(int)                 # per-epoch accumulation hook
     aug_stats = {"per_epoch_synth_counts": [],     # list of lists, length = num_classes
                  "num_classes": int(y_train.max()) + 1}
+
+    # ---- Quota for exact “balance to majority” (NEW)
+    train_counts = np.bincount(y_train.astype(int), minlength=int(y_train.max()) + 1)
+    majority = int(train_counts.max())
+    quota = {int(c): int(max(0, majority - cnt)) for c, cnt in enumerate(train_counts.tolist())}
 
     # ---- Train
     best_bal_acc, best_state = 0.0, None
@@ -329,7 +335,9 @@ def main():
                 amp_enabled=True,
                 microbatch=256,
                 log_every=200,
-                gen_counter=gen_counter,  # NEW: wire counter
+                gen_counter=gen_counter,
+                quota=quota,
+                auto_balance_to_majority=autobalance,   # <--- AUTO BALANCE
             )
 
             model.train()
@@ -340,8 +348,8 @@ def main():
         else:
             # Margin warmup for arcface/cos head
             if hasattr(model, "cos_head"):
-                T_half = max(1, int(0.3 * epochs))        # ~30% warmup
-                warm = min(1.0, (epoch / T_half) ** 2)    # quadratic
+                T_half = max(1, int(0.3 * epochs))
+                warm = min(1.0, (epoch / T_half) ** 2)
                 num_classes = model.classifier[-1].out_features
                 base_m = float(cfg["model"]["m"])
                 per_m = torch.full((num_classes,), base_m, device=device)
@@ -394,7 +402,7 @@ def main():
             best_bal_acc = val["bal_acc"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
-        # === NEW: snapshot synthetic counts after each epoch ===
+        # === snapshot synthetic counts after each epoch ===
         if (not args.baseline):
             C = aug_stats["num_classes"]
             snap = [0] * C
@@ -445,9 +453,8 @@ def main():
     except Exception:
         pass
 
-    # ===== NEW: Save training counts and diffusion synthetic counts =====
+    # ===== Save training counts and diffusion synthetic counts =====
     try:
-        train_counts = np.bincount(y_train.astype(int), minlength=int(y_train.max()) + 1)
         np.save(os.path.join(results_dir, "train_counts.npy"), train_counts)
 
         if len(aug_stats["per_epoch_synth_counts"]):
