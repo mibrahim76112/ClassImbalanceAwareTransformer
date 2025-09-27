@@ -3,6 +3,9 @@ import pandas as pd
 import pyreadr
 from pathlib import Path
 
+# NEW: read optional slice settings directly from config.yaml if present
+import yaml
+
 try:
     import cupy as cp
     from cuml.preprocessing import StandardScaler as cuStandardScaler
@@ -12,6 +15,40 @@ except Exception:
     GPU_AVAILABLE = False
 
 from sklearn.preprocessing import StandardScaler as skStandardScaler
+
+
+# -------------------------
+# helpers
+# -------------------------
+def _try_load_slices_from_config():
+    """
+    Try to load normal (fault 0) train/test slice bounds from config.yaml.
+
+    Returns
+    -------
+    dict with keys:
+        normal_train_start, normal_train_end, normal_test_start, normal_test_end
+    or {} if config not found / keys not present.
+    """
+    cfg_path = Path(__file__).parent.parent / "config.yaml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        with open(cfg_path, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+        dw = (cfg.get("data_windowing") or {})
+        return {
+            "normal_train_start": int(dw.get("normal_train_start"))
+                if dw.get("normal_train_start") is not None else None,
+            "normal_train_end": int(dw.get("normal_train_end"))
+                if dw.get("normal_train_end") is not None else None,
+            "normal_test_start": int(dw.get("normal_test_start"))
+                if dw.get("normal_test_start") is not None else None,
+            "normal_test_end": int(dw.get("normal_test_end"))
+                if dw.get("normal_test_end") is not None else None,
+        }
+    except Exception:
+        return {}
 
 
 def read_training_data(ff_path: str, ft_path: str):
@@ -33,22 +70,38 @@ def read_training_data(ff_path: str, ft_path: str):
 
 def sample_train_and_test(
     train_ts,
-    type_model="supervised",
-    post_fault_start=100,
+    type_model: str = "supervised",
+    post_fault_start: int = 100,
     train_runs=range(1, 25),
     test_runs=range(26, 38),
+    # NEW: normal (fault=0) slice controls
+    normal_train_start: int = 0,
+    normal_train_end: int = 42000,
+    normal_test_start: int = 42000,
+    normal_test_end: int = 44000,
 ):
     """
     Slice training/testing windows from the TEP table.
+
+    Parameters
+    ----------
+    type_model : "supervised" or other
+    post_fault_start : int
+        index in each faulty run from which to take post-fault windows
+    train_runs, test_runs : iterable of run ids
+    normal_* : ints
+        start/end indices for fault 0 (normal) rows to include in train/test
+        (equivalent to fault_0.iloc[start:end])
     """
     frames_train, frames_test = [], []
     fault_0 = train_ts[train_ts['faultNumber'] == 0]
 
-    # TRAIN
+    # ---------------- TRAIN ----------------
     if type_model == "supervised":
         for i in sorted(train_ts['faultNumber'].unique()):
             if i == 0:
-                frames_train.append(fault_0.iloc[0:42000])
+                
+                frames_train.append(fault_0.iloc[normal_train_start:normal_train_end])
             else:
                 b = train_ts[train_ts['faultNumber'] == i]
                 per = []
@@ -57,14 +110,15 @@ def sample_train_and_test(
                     per.append(bx.iloc[post_fault_start:500])
                 frames_train.append(pd.concat(per))
     else:
-        frames_train.append(fault_0)
+        frames_train.append(fault_0.iloc[normal_train_start:normal_train_end])
 
     sampled_train = pd.concat(frames_train).sort_values(['faultNumber', 'simulationRun', 'sample'])
 
-    # TEST
+    # ---------------- TEST ----------------
     for i in sorted(train_ts['faultNumber'].unique()):
         if i == 0:
-            frames_test.append(fault_0.iloc[42000:44000])
+          
+            frames_test.append(fault_0.iloc[normal_test_start:normal_test_end])
         else:
             b = train_ts[train_ts['faultNumber'] == i]
             per = []
@@ -117,16 +171,32 @@ def load_sampled_data(*,
                       ff_path: str, ft_path: str,
                       post_fault_start=100,
                       train_runs=range(1, 25),
-                      test_runs=range(26, 38)):
+                      test_runs=range(26, 38),
+                      # NEW: allow caller to pass slices; if None, try config; else defaults
+                      normal_train_start: int = None,
+                      normal_train_end: int = None,
+                      normal_test_start: int = None,
+                      normal_test_end: int = None):
     """
     End-to-end loading + scaling + windowing.
     """
+    # Fill normal slices from config.yaml if caller didn't pass them
+    cfg_slices = _try_load_slices_from_config()
+    ntr_s = normal_train_start if normal_train_start is not None else cfg_slices.get("normal_train_start", 0)
+    ntr_e = normal_train_end   if normal_train_end   is not None else cfg_slices.get("normal_train_end",   42000)
+    nte_s = normal_test_start  if normal_test_start  is not None else cfg_slices.get("normal_test_start",  42000)
+    nte_e = normal_test_end    if normal_test_end    is not None else cfg_slices.get("normal_test_end",    44000)
+
     ts = read_training_data(ff_path, ft_path)
     tr, te = sample_train_and_test(
         ts, type_model,
         post_fault_start=post_fault_start,
         train_runs=train_runs,
-        test_runs=test_runs
+        test_runs=test_runs,
+        normal_train_start=ntr_s,
+        normal_train_end=ntr_e,
+        normal_test_start=nte_s,
+        normal_test_end=nte_e
     )
 
     fault_free = tr[tr['faultNumber'] == 0].iloc[:, 3:].values
