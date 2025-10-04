@@ -108,7 +108,6 @@ def main():
     if args.baseline and args.arcface_only:
         raise ValueError("Choose either --baseline or --arcface-only, not both.")
 
-
     # ---- Load YAML config
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -144,6 +143,7 @@ def main():
         post_fault_start=post_fault_start, train_runs=train_runs, test_runs=test_runs
     )
 
+    from sklearn.model_selection import StratifiedShuffleSplit
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.15, random_state=seed)
     (train_idx, val_idx), = sss.split(X_train, y_train)
     X_tr, y_tr = X_train[train_idx], y_train[train_idx]
@@ -453,21 +453,47 @@ def main():
     except Exception:
         pass
 
-    # ===== Save training counts and diffusion synthetic counts =====
+        # ===== Export diffusion-generated embeddings (config-driven) =====
     try:
-        np.save(os.path.join(results_dir, "train_counts.npy"), train_counts)
+        if (not args.baseline) and use_diffusion and (diffusion_model is not None):
+            diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
+            selected_faults = diff_cfg.get("selected_faults", None)  # <--- read from config
+            export_per_class = int(diff_cfg.get("export_per_class", 300))  # optional knob
 
-        if len(aug_stats["per_epoch_synth_counts"]):
-            synth_counts = np.array(aug_stats["per_epoch_synth_counts"]).sum(axis=0)
-        else:
-            synth_counts = np.zeros_like(train_counts)
-        np.save(os.path.join(results_dir, "diffusion_synth_counts.npy"), synth_counts)
+            # Prefer unrestricted sampler if available
+            sampler = getattr(diffusion_model, "ddim_sample_raw", None)
+            if sampler is None:
+                sampler = diffusion_model.ddim_sample
 
-        with open(os.path.join(results_dir, "diffusion_aug_stats.json"), "w") as f:
-            json.dump({"per_epoch_synth_counts": aug_stats["per_epoch_synth_counts"],
-                       "num_classes": aug_stats["num_classes"]}, f, indent=2)
+            if selected_faults:
+                # Generate only requested faults; save one file per fault (+ merged helper file)
+                all_data = {}
+                for f_id in selected_faults:
+                    f_id = int(f_id)
+                    y_c = torch.full((export_per_class,), f_id, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        Zc = sampler(y=y_c, n=export_per_class, steps=diff_steps_infer)
+                    arr = Zc.detach().cpu().numpy()
+                    np.save(os.path.join(results_dir, f"gen_f{f_id}.npy"), arr)
+                    all_data[str(f_id)] = arr
+                    print(f"[OK] Saved gen_f{f_id}.npy (shape={arr.shape})")
+                # convenience combined file with only the selected faults
+                np.save(os.path.join(results_dir, "gen_selected.npy"), all_data, allow_pickle=True)
+                print(f"[OK] Combined file gen_selected.npy with faults {selected_faults}")
+            else:
+                # Backward-compatible behavior: generate ALL classes into gen_all.npy
+                C = int(y_train.max()) + 1
+                gen_by_class = {}
+                for c in range(C):
+                    y_c = torch.full((export_per_class,), c, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        Zc = sampler(y=y_c, n=export_per_class, steps=diff_steps_infer)
+                    gen_by_class[str(c)] = Zc.detach().cpu().numpy()
+                np.save(os.path.join(results_dir, "gen_all.npy"), gen_by_class, allow_pickle=True)
+                print(f"[OK] Saved diffusion-generated embeddings per class -> {os.path.join(results_dir,'gen_all.npy')}")
     except Exception as e:
-        print(f"[WARN] Could not save diffusion accounting: {e}")
+        print(f"[WARN] Could not export diffusion embeddings: {e}")
+
 
 if __name__ == "__main__":
     main()
