@@ -6,6 +6,8 @@ from sklearn.metrics import (
     confusion_matrix, classification_report,
     accuracy_score, balanced_accuracy_score, f1_score
 )
+from sklearn.manifold import TSNE
+
 
 @torch.no_grad()
 def get_preds_and_logits(model, loader, device):
@@ -133,7 +135,7 @@ def plot_embedding(feats, y, method="umap",
         except Exception:
             method = "tsne"
     if method.lower() == "tsne":
-        from sklearn.manifold import TSNE
+       
         Z = TSNE(n_components=2, learning_rate="auto", init="random",
                  perplexity=35, random_state=seed).fit_transform(X)
 
@@ -303,4 +305,62 @@ def plot_effective_training_distribution(train_counts, synth_counts,
     ax.set_title("Effective training mix: real vs diffusion per class\n(+ normalized pre/post overlays)")
     ax.legend(loc="upper left")
     ax2.legend(loc="upper right")
+    plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
+
+
+
+def plot_tsne_normal_fault6_generated(
+    feats_real,                # (N x D) real embeddings
+    y_real,                    # (N,) integer labels aligned with feats_real
+    gen_fault6_feats=None,     # (M x D) synthetic embeddings for class 6
+    normal_label=0,
+    fault6_label=6,
+    save_path="results/tsne_norm_f6_gen.png",
+    max_per_group=650,
+    seed=0
+):
+    """
+    Makes a t-SNE with exactly three clouds:
+      - Normal (real)
+      - Fault 6 (real)
+      - Fault 6 Generated (synthetic)
+    Keeps your full multi-class plot elsewhere (pic2).
+    """
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    rng = np.random.default_rng(seed)
+
+    # pick indices
+    idx_norm = np.where(y_real == normal_label)[0]
+    idx_f6   = np.where(y_real == fault6_label)[0]
+
+    # subsample for legibility
+    def _pick(idx):
+        if len(idx) > max_per_group:
+            return rng.choice(idx, size=max_per_group, replace=False)
+        return idx
+
+    idx_norm = _pick(idx_norm)
+    idx_f6   = _pick(idx_f6)
+
+    X_norm = feats_real[idx_norm]
+    X_f6   = feats_real[idx_f6]
+    X_gen  = np.asarray(gen_fault6_feats) if gen_fault6_feats is not None else np.empty((0, feats_real.shape[1]))
+
+    # joint embedding so all three groups live in the same 2D space
+    X_all = np.concatenate([X_norm, X_f6, X_gen], axis=0)
+    Z_all = TSNE(n_components=2, learning_rate="auto", init="random",
+                 perplexity=35, random_state=seed).fit_transform(X_all)
+
+    n_norm = len(X_norm); n_f6 = len(X_f6)
+    a = 0; b = a + n_norm; c = b + n_f6
+    Z_norm, Z_f6, Z_gen = Z_all[a:b], Z_all[b:c], Z_all[c:]
+
+    # draw – colors chosen to resemble your pic1
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(Z_norm[:,0], Z_norm[:,1], s=10, c="#1f77b4", label="Normal")           # blue
+    ax.scatter(Z_f6[:,0],   Z_f6[:,1],   s=18, c="#ff7f0e", label="Fault 6")          # orange
+    if len(Z_gen):
+        ax.scatter(Z_gen[:,0],  Z_gen[:,1],  s=18, c="#2ca02c", label="Fault 6 Generated")  # green
+    ax.legend(frameon=True, loc="best")
+    ax.set_title("t-SNE: Normal vs Fault 6 vs Fault 6 Generated")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
