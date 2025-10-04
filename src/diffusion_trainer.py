@@ -140,6 +140,7 @@ def train_decision_diffusion_streaming(
 
     ddm.eval()
     _orig_ddim_sample = ddm.ddim_sample  # save original to avoid recursion
+    ddm.ddim_sample_raw = _orig_ddim_sample  # <-- NEW: expose unrestricted sampler for offline export
     _auto_filled_once = False
 
     def _attribute_and_decrement(cap_map, kept_total: int):

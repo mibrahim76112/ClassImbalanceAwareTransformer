@@ -4,7 +4,7 @@ from src.plots import (
     plot_embedding, plot_center_similarity, plot_inter_intra_distributions,
     plot_validation_metrics, plot_ce_loss,
     plot_real_vs_diffusion_counts, plot_effective_training_distribution,  # NEW
-    plot_tsne_normal_fault6_generated,  # NEW (pic1-style)
+    plot_tsne_normal_fault6_generated,  # NEW (3-group t-SNE)
 )
 
 def _p(path): return os.path.abspath(path)
@@ -29,11 +29,13 @@ def main():
                     help="Use UMAP for the regular 'embed' plot. (embed3 is always t-SNE)")
     ap.add_argument("--baseline-report", default=None)
 
-    # NEW: settings for the pic1-style 3-group plot
-    ap.add_argument("--gen-f6-path", default=None,
-                    help="Path to numpy array of generated Fault-6 embeddings (e.g., results/gen_f6.npy)")
-    ap.add_argument("--normal-label", type=int, default=0)
-    ap.add_argument("--fault6-label", type=int, default=6)
+    # NEW: for the 3-group t-SNE
+    ap.add_argument("--gen-all-path", default=None,
+                    help="NPY (pickled dict) with generated embeddings for ALL faults. Default: results/gen_all.npy")
+    ap.add_argument("--fault", type=int, default=6,
+                    help="Fault label to visualize in the 3-group t-SNE (default: 6)")
+    ap.add_argument("--normal-label", type=int, default=0,
+                    help="Label used for Normal (default: 0)")
     ap.add_argument("--max-per-group", type=int, default=650)
 
     args = ap.parse_args()
@@ -51,8 +53,7 @@ def main():
     train_counts_path = os.path.join(rd, "train_counts.npy")                 # NEW
     diff_synth_path   = os.path.join(rd, "diffusion_synth_counts.npy")       # NEW
 
-    # sensible default for generated Fault-6 embeddings
-    gen_f6_path = args.gen_f6_path or os.path.join(rd, "gen_f6.npy")
+    gen_all_path = args.gen_all_path or os.path.join(rd, "gen_all.npy")
 
     y_train = np.load(y_train_path) if _exists(y_train_path) else None
     y_true  = np.load(y_true_path)  if _exists(y_true_path)  else None
@@ -81,25 +82,36 @@ def main():
         else:
             print("[SKIP] embed: need test_feats.npy and test_y.npy")
 
-    # NEW: pic1-style 3-group t-SNE (Normal, Fault 6, Fault 6 Generated)
+    # NEW: pic1-style 3-group t-SNE (Normal, Fault k, Generated(Fault k))
     if "embed3" in wanted:
         if feats is not None and y_true is not None:
-            gen_f6 = np.load(gen_f6_path) if _exists(gen_f6_path) else None
-            if gen_f6 is None:
-                print(f"[WARN] embed3: {gen_f6_path} not found; plotting just Normal vs Fault 6 (no Generated)")
-                gen_f6 = np.empty((0, feats.shape[1]), dtype=feats.dtype)
+            Z_gen = None
+            if _exists(gen_all_path):
+                try:
+                    d = np.load(gen_all_path, allow_pickle=True).item()
+                    key = str(args.fault)
+                    Z_gen = d.get(key, None)
+                    if Z_gen is None or len(Z_gen) == 0:
+                        print(f"[WARN] embed3: fault {args.fault} not present in {gen_all_path}; plotting without Generated.")
+                        Z_gen = np.empty((0, feats.shape[1]), dtype=feats.dtype)
+                except Exception as e:
+                    print(f"[WARN] embed3: could not read {gen_all_path}: {e}; plotting without Generated.")
+                    Z_gen = np.empty((0, feats.shape[1]), dtype=feats.dtype)
+            else:
+                print(f"[WARN] embed3: {gen_all_path} not found; plotting without Generated.")
+                Z_gen = np.empty((0, feats.shape[1]), dtype=feats.dtype)
 
             plot_tsne_normal_fault6_generated(
                 feats_real=feats,
                 y_real=y_true.astype(int),
-                gen_fault6_feats=gen_f6,
+                gen_fault6_feats=Z_gen,
                 normal_label=args.normal_label,
-                fault6_label=args.fault6_label,
-                save_path=os.path.join(rd,"tsne_norm_f6_gen.png"),
+                fault6_label=args.fault,
+                save_path=os.path.join(rd, f"tsne_norm_f{args.fault}_gen.png"),
                 max_per_group=args.max_per_group,
                 seed=0
             )
-            print("[OK] tsne_norm_f6_gen.png")
+            print(f"[OK] tsne_norm_f{args.fault}_gen.png")
         else:
             print("[SKIP] embed3: need test_feats.npy and test_y.npy")
 
@@ -136,7 +148,7 @@ def main():
         else:
             print("[SKIP] valmetrics: history.npz not found")
 
-    # ===== diffusion balancing plots =====
+    # ===== NEW: diffusion balancing plots =====
     if "diffbalance" in wanted:
         if _exists(train_counts_path) and _exists(diff_synth_path):
             train_counts = np.load(train_counts_path)
