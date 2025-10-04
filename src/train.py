@@ -453,7 +453,7 @@ def main():
     except Exception:
         pass
 
-        # ===== Export diffusion-generated embeddings (config-driven) =====
+    # ===== Export diffusion-generated embeddings (config-driven) =====
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
