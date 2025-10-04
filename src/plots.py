@@ -321,8 +321,8 @@ def plot_tsne_normal_fault6_generated(
     """
     Makes a t-SNE with exactly three clouds:
       - Normal (real)
-      - Fault (real)   [label=fault6_label]
-      - Fault Generated (synthetic)  [from gen_fault6_feats]
+      - Fault (real)   
+      - Fault Generated (synthetic)
     """
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     rng = np.random.default_rng(seed)
