@@ -455,7 +455,6 @@ def main():
         # ===== Export diffusion-generated embeddings (gated, unit-norm; optional unnorm) =====
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
-            import numpy as np
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
             sel_faults = [int(x) for x in (diff_cfg.get("selected_faults", []) or [])]
             if not sel_faults:
@@ -468,14 +467,12 @@ def main():
                 sampler = getattr(diffusion_model, "ddim_sample_raw", diffusion_model.ddim_sample)
 
                 # ---- Build a strong gate for a given class id
-                import torch
-                import torch.nn.functional as F
-
+                # (No inner imports here—torch and F are already imported at top of file)
                 # load centers if available (optional but improves gating)
-                centers = None
+                centers_np = None
                 centers_path = os.path.join(results_dir, "centers.npy")
                 if os.path.exists(centers_path):
-                    centers = np.load(centers_path)
+                    centers_np = np.load(centers_path)
 
                 def make_strict_gate(model, class_k: int, device="cuda",
                                      delta_logit=0.10,        # margin to runner-up (scaled by s)
@@ -517,7 +514,7 @@ def main():
                 def export_with_gate(fid: int, n_keep: int, steps: int, chunk: int = 4096, max_rounds: int = 20):
                     gate = make_strict_gate(model, class_k=fid, device=device,
                                             delta_logit=0.10, min_conf=0.65,
-                                            normal_label=0, centers_tensor=centers,
+                                            normal_label=0, centers_tensor=centers_np,
                                             min_cos_to_k=0.70, max_cos_to_normal=0.40)
                     kept = []
                     rounds = 0
@@ -528,7 +525,7 @@ def main():
                         Zprop  = sampler(y=y_prop, n=k, steps=steps, margin_gate=gate)
                         if Zprop is not None and Zprop.numel():
                             kept.append(Zprop.detach().cpu())
-                        # if gate returns nothing this round, loop again
+                        # if gate returns nothing this round, try again (up to max_rounds)
                     if kept:
                         Z = torch.cat(kept, dim=0)[:n_keep]
                     else:
@@ -544,7 +541,7 @@ def main():
                     merged[str(fid)] = arr
                     print(f"[OK] Saved gated gen_f{fid}.npy (shape={arr.shape})")
 
-                # Also dump a combined dict for convenience
+                # Combined dict for convenience
                 np.save(os.path.join(results_dir, "gen_selected.npy"), merged, allow_pickle=True)
                 print(f"[OK] Saved gen_selected.npy for faults {sel_faults}")
 
@@ -562,7 +559,6 @@ def main():
 
     except Exception as e:
         print(f"[WARN] Could not export diffusion embeddings: {e}")
-
 
 
 
