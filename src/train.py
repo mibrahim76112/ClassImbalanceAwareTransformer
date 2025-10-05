@@ -475,41 +475,47 @@ def main():
                     centers_np = np.load(centers_path)
 
                 def make_strict_gate(model, class_k: int, device="cuda",
-                                     delta_logit=0.10,        # margin to runner-up (scaled by s)
-                                     min_conf=0.65,           # min softmax prob for class k
-                                     normal_label=0,          # which label is Normal
-                                     centers_tensor=None,     # optional (C,D)
-                                     min_cos_to_k=0.70,       # keep if cos >= this to class-k center
-                                     max_cos_to_normal=0.40   # reject if cos >= this to Normal center
-                                     ):
-                    # W: (D, C), z: (N, D) — all L2-normalized before cosine
-                    W = torch.nn.functional.normalize(model.cos_head.W.to(device), dim=0)
+                                    delta_logit=0.10,        # margin to runner-up (scaled by s)
+                                    min_conf=0.65,           # min softmax prob for class k
+                                    normal_label=0,          # which label is Normal
+                                    centers_tensor=None,     # optional (C,D)
+                                    min_cos_to_k=0.70,       # keep if cos >= this to class-k center
+                                    max_cos_to_normal=0.40   # reject if cos >= this to Normal center
+                                    ):
+                    # cos_head.W is (C, D) -> normalize rows and transpose to (D, C)
+                    W = model.cos_head.W.to(device)                          # (C, D)
+                    W = torch.nn.functional.normalize(W, dim=1)              # normalize each class vector
+                    W_t = W.t()                                              # (D, C)
                     s = float(getattr(model.cos_head, "s", 30.0))
+
                     Ck = Cn = None
                     if centers_tensor is not None:
-                        ct = torch.as_tensor(centers_tensor, dtype=torch.float32, device=device)
+                        ct = torch.as_tensor(centers_tensor, dtype=torch.float32, device=device)  # (C, D)
                         ct = torch.nn.functional.normalize(ct, dim=-1)
                         if 0 <= class_k < ct.size(0):
-                            Ck = ct[class_k]
+                            Ck = ct[class_k]  # (D,)
                         if 0 <= normal_label < ct.size(0):
-                            Cn = ct[normal_label]
+                            Cn = ct[normal_label]  # (D,)
 
                     def gate(z, y):
-                        # normalize samples
-                        z = torch.nn.functional.normalize(z, dim=-1)
-                        logits = s * (z @ W)                  # (N, C)
-                        probs  = torch.softmax(logits, dim=1) # (N, C)
+                        z = torch.nn.functional.normalize(z, dim=-1)         # (N, D)
+                        logits = s * (z @ W_t)                               # (N, C)
+                        probs  = torch.softmax(logits, dim=1)                # (N, C)
                         top2   = torch.topk(logits, 2, dim=1).values
+
                         is_topk   = (logits.argmax(1) == class_k)
                         conf_ok   = (probs[:, class_k] >= min_conf)
                         margin_ok = (top2[:, 0] - top2[:, 1] >= s * delta_logit)
+
                         keep = is_topk & conf_ok & margin_ok
                         if Ck is not None:
                             keep = keep & ((z @ Ck) >= min_cos_to_k)
                         if Cn is not None:
                             keep = keep & ((z @ Cn) <= max_cos_to_normal)
                         return keep
+
                     return gate
+
 
                 device = next(model.parameters()).device
 
