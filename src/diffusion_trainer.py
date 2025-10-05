@@ -1,3 +1,4 @@
+# src/diffusion_trainer.py
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -74,11 +75,8 @@ def train_decision_diffusion_streaming(
     exposes a wrapper around sampling that (a) enforces per-class quotas and
     (b) optionally auto-balances each class up to the majority count.
 
-    - gen_counter: defaultdict(int) to accumulate KEPT synthetic counts per class.
-    - quota: dict[class] -> remaining budget to reach majority count.
-    - auto_balance_to_majority: if True, the first time sampling is called we
-      proactively generate all remaining quota (in chunks), independent of synth_ratio.
-    - max_gen_chunk: caps the size of any single generation call for memory safety.
+    We also collect per-class feature norms ("radius bank") **before** normalization,
+    and expose a helper to rescale sampled unit vectors back to real magnitudes.
     """
     model.eval()
     ddm = None
@@ -97,6 +95,9 @@ def train_decision_diffusion_streaming(
             quota_dd[int(k)] = int(v)
     quota = quota_dd
 
+    # --- NEW: radius bank (list of lists of floats), filled during training
+    radius_bank = [ [] for _ in range(num_classes) ]
+
     step = 0
     for ep in range(1, epochs + 1):
         tot, n = 0.0, 0
@@ -105,10 +106,17 @@ def train_decision_diffusion_streaming(
             yb = yb.to(device, non_blocking=True)
 
             with torch.no_grad():
-                fb = model.forward_features(xb)
+                fb = model.forward_features(xb)            # raw features
                 if use_project and hasattr(model, "project"):
                     fb = model.project(fb)
-                zb = F.normalize(fb, dim=-1)  # (B, D)
+
+                # --- collect raw radii per class (before normalization)
+                rb = torch.norm(fb, dim=-1)                # (B,)
+                for r_val, y_val in zip(rb.detach().cpu(), yb.detach().cpu()):
+                    radius_bank[int(y_val)].append(float(r_val))
+
+                # normalized features used for diffusion loss (same as before)
+                zb = F.normalize(fb, dim=-1)               # (B, D)
 
             # Lazy-init diffusion on first real batch
             if ddm is None:
@@ -139,8 +147,48 @@ def train_decision_diffusion_streaming(
         print(f"[Diffusion] epoch {ep}: loss={tot/max(1,n):.4f}")
 
     ddm.eval()
-    _orig_ddim_sample = ddm.ddim_sample  # save original to avoid recursion
-    ddm.ddim_sample_raw = _orig_ddim_sample  # <-- NEW: expose unrestricted sampler for offline export
+
+    # Save the original sampler and expose it (unrestricted) for offline export if desired.
+    _orig_ddim_sample = ddm.ddim_sample
+    ddm.ddim_sample_raw = _orig_ddim_sample  # exposed raw sampler (no quotas/margin gate here)
+
+    # --- NEW: attach radius bank tensors to ddm
+    try:
+        ddm._radius_bank = [
+            torch.tensor(r, dtype=torch.float32) if len(r) else torch.tensor([], dtype=torch.float32)
+            for r in radius_bank
+        ]
+    except Exception:
+        ddm._radius_bank = []
+
+    # --- NEW: helper to rescale unit vectors to empirical radii
+    @torch.no_grad()
+    def _rescale_to_real_radii(z_unit: torch.Tensor, y: torch.Tensor):
+        """
+        Convert unit-norm samples to unnormalized space by drawing radii from
+        the empirical per-class radius bank collected during training.
+        """
+        bank = getattr(ddm, "_radius_bank", None)
+        if not bank or len(bank) == 0:
+            return z_unit  # fallback: nothing to do
+        N = z_unit.size(0)
+        radii = torch.empty(N, device=z_unit.device, dtype=z_unit.dtype)
+        for c in torch.unique(y).tolist():
+            c = int(c)
+            idx = (y == c).nonzero(as_tuple=False).squeeze(1)
+            if idx.numel() == 0:
+                continue
+            br = bank[c].to(z_unit.device) if c < len(bank) else torch.tensor([], device=z_unit.device)
+            if br.numel() == 0:
+                radii[idx] = 1.0
+            else:
+                sel = torch.randint(low=0, high=br.numel(), size=(idx.numel(),), device=z_unit.device)
+                radii[idx] = br[sel]
+        return z_unit * radii.unsqueeze(1)
+
+    # expose the helper for callers (e.g., export step in train.py)
+    ddm.rescale_to_real_radii = _rescale_to_real_radii
+
     _auto_filled_once = False
 
     def _attribute_and_decrement(cap_map, kept_total: int):
@@ -173,10 +221,9 @@ def train_decision_diffusion_streaming(
     def _generate_for_cap_map(cap_map: Dict[int, int], margin_gate):
         """
         Generate for a given {class: requested_amount} map, in chunks.
-        Critically, we now decrement the remaining request per class by the **KEPT**
+        Critically, we decrement the remaining request per class by the **KEPT**
         amount (post margin gate), not by the requested amount.
         """
-        # Make an editable copy of requests
         remaining_map = {int(c): int(v) for c, v in cap_map.items() if int(v) > 0}
         if not remaining_map:
             return 0
@@ -213,7 +260,7 @@ def train_decision_diffusion_streaming(
 
             # Decrement remaining_map by the **kept** per class
             progress = 0
-            for c, asked in chunk_cap_map.items():
+            for c, _asked in chunk_cap_map.items():
                 kept_c = kept_map.get(c, 0)
                 if c in remaining_map:
                     remaining_map[c] = max(0, remaining_map[c] - kept_c)
@@ -229,7 +276,7 @@ def train_decision_diffusion_streaming(
             else:
                 no_progress_rounds = 0
             if no_progress_rounds >= 3:
-                print("[Diffusion][auto-balance] No progress for 3 chunks; stopping early to avoid infinite loop.")
+                print("[Diffusion][auto-balance] No progress for 3 chunks; stopping early.")
                 break
 
         return kept_total_all
@@ -238,7 +285,7 @@ def train_decision_diffusion_streaming(
     def ddim_sample(y, n=None, steps=None, margin_gate=None):
         """
         Wrap original sampler to:
-          1) (optional) **auto-balance**: immediately generate all remaining quota
+          1) (optional) auto-balance: immediately generate all remaining quota
              (up to the majority) the first time this is called.
           2) Otherwise, enforce per-call quotas and count kept samples.
         """
@@ -274,6 +321,7 @@ def train_decision_diffusion_streaming(
         _ = _generate_for_cap_map(cap_map, margin_gate)
         return torch.empty(0, ddm.feat_dim, device=device)
 
+    # install the quota-enforcing wrapper
     ddm.ddim_sample = ddim_sample
     ddm._gen_counter = gen_counter
     ddm._quota = quota

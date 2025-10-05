@@ -32,7 +32,7 @@ training:
     width: 512
     depth: 3
     margin_gate_delta: 0.05
-    selected_faults: [5, 6, 8, 13]
+    selected_faults: [5, 6]
 
 model:
   s: 16.0
