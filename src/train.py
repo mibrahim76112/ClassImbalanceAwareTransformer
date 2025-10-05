@@ -452,57 +452,113 @@ def main():
                         centers.centers.detach().cpu().numpy())
     except Exception:
         pass
-        # ===== Export diffusion-generated embeddings (UNnormalized for selected faults) =====
+        # ===== Export diffusion-generated embeddings (gated, unit-norm; optional unnorm) =====
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
+            import numpy as np
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
-            selected_faults = diff_cfg.get("selected_faults", None)           # e.g., [5, 6, 8, 13]
-            export_per_class = int(diff_cfg.get("export_per_class", 300))
-            export_steps = int(diff_cfg.get("export_steps_infer", diff_steps_infer))
-
-            if not selected_faults:
-                print("[EXPORT] No 'selected_faults' in config; skipping unnormalized export.")
+            sel_faults = [int(x) for x in (diff_cfg.get("selected_faults", []) or [])]
+            if not sel_faults:
+                print("[EXPORT] No 'selected_faults' provided; skipping gated export.")
             else:
-                # Always use the RAW sampler so we actually get n samples (no quotas/empty returns)
-                sampler = getattr(diffusion_model, "ddim_sample_raw", None)
-                if sampler is None:
-                    sampler = diffusion_model.ddim_sample
+                export_per_class = int(diff_cfg.get("export_per_class", 300))
+                export_steps = int(diff_cfg.get("export_steps_infer", diff_steps_infer))
 
-                # Prefer accurate per-sample rescale; fall back to mean; else warn & save normalized
-                has_rescale = hasattr(diffusion_model, "rescale_to_real_radii")
-                has_rescale_mean = hasattr(diffusion_model, "rescale_to_real_radii_mean")
+                # raw sampler (supports margin_gate and never short-circuits for quotas)
+                sampler = getattr(diffusion_model, "ddim_sample_raw", diffusion_model.ddim_sample)
+
+                # ---- Build a strong gate for a given class id
+                import torch
+                import torch.nn.functional as F
+
+                # load centers if available (optional but improves gating)
+                centers = None
+                centers_path = os.path.join(results_dir, "centers.npy")
+                if os.path.exists(centers_path):
+                    centers = np.load(centers_path)
+
+                def make_strict_gate(model, class_k: int, device="cuda",
+                                     delta_logit=0.10,        # margin to runner-up (scaled by s)
+                                     min_conf=0.65,           # min softmax prob for class k
+                                     normal_label=0,          # which label is Normal
+                                     centers_tensor=None,     # optional (C,D)
+                                     min_cos_to_k=0.70,       # keep if cos >= this to class-k center
+                                     max_cos_to_normal=0.40   # reject if cos >= this to Normal center
+                                     ):
+                    W = F.normalize(model.cos_head.W.to(device), dim=0)   # (D,C)
+                    s = float(getattr(model.cos_head, "s", 30.0))
+                    Ck = Cn = None
+                    if centers_tensor is not None:
+                        ct = torch.as_tensor(centers_tensor, dtype=torch.float32, device=device)
+                        ct = F.normalize(ct, dim=-1)
+                        if 0 <= class_k < ct.size(0):
+                            Ck = ct[class_k]
+                        if 0 <= normal_label < ct.size(0):
+                            Cn = ct[normal_label]
+
+                    def gate(z, y):
+                        z = F.normalize(z, dim=-1)
+                        logits = s * (z @ W)                  # (N,C)
+                        probs  = torch.softmax(logits, dim=1) # (N,C)
+                        top2   = torch.topk(logits, 2, dim=1).values
+                        is_topk   = (logits.argmax(1) == class_k)
+                        conf_ok   = (probs[:, class_k] >= min_conf)
+                        margin_ok = (top2[:,0] - top2[:,1] >= s * delta_logit)
+                        keep = is_topk & conf_ok & margin_ok
+                        if Ck is not None:
+                            keep = keep & ((z @ Ck) >= min_cos_to_k)
+                        if Cn is not None:
+                            keep = keep & ((z @ Cn) <= max_cos_to_normal)
+                        return keep
+                    return gate
+
+                device = next(model.parameters()).device
+
+                def export_with_gate(fid: int, n_keep: int, steps: int, chunk: int = 4096, max_rounds: int = 20):
+                    gate = make_strict_gate(model, class_k=fid, device=device,
+                                            delta_logit=0.10, min_conf=0.65,
+                                            normal_label=0, centers_tensor=centers,
+                                            min_cos_to_k=0.70, max_cos_to_normal=0.40)
+                    kept = []
+                    rounds = 0
+                    while sum(k.size(0) for k in kept) < n_keep and rounds < max_rounds:
+                        rounds += 1
+                        k = min(chunk, n_keep - sum(t.size(0) for t in kept))
+                        y_prop = torch.full((k,), fid, dtype=torch.long, device=device)
+                        Zprop  = sampler(y=y_prop, n=k, steps=steps, margin_gate=gate)
+                        if Zprop is not None and Zprop.numel():
+                            kept.append(Zprop.detach().cpu())
+                        # if gate returns nothing this round, loop again
+                    if kept:
+                        Z = torch.cat(kept, dim=0)[:n_keep]
+                    else:
+                        Z = torch.empty((0, model.cos_head.W.size(0)))
+                    return Z
 
                 merged = {}
-                for fid in [int(x) for x in selected_faults]:
-                    y_c = torch.full((export_per_class,), fid, dtype=torch.long, device=device)
-                    with torch.no_grad():
-                        Zhat = sampler(y=y_c, n=export_per_class, steps=export_steps)  # unit-norm
-
-                        if Zhat is None or Zhat.numel() == 0:
-                            print(f"[WARN] Export: sampler returned 0 rows for class {fid}; skipping.")
-                            arr = np.empty((0, Zhat.shape[-1] if Zhat is not None else feat_dim), dtype=np.float32)
-                        else:
-                            # Trim labels to match returned rows (safety)
-                            y_match = y_c[:Zhat.size(0)]
-
-                            if has_rescale:
-                                Z = diffusion_model.rescale_to_real_radii(Zhat, y_match)  # match empirical dist
-                            elif has_rescale_mean:
-                                Z = diffusion_model.rescale_to_real_radii_mean(Zhat, y_match)  # fast mean radius
-                            else:
-                                print(f"[WARN] Export: no rescale helper found; saving NORMALIZED samples for class {fid}.")
-                                Z = Zhat
-
-                            arr = Z.detach().cpu().numpy()
-
-                    # Save per-fault UNnormalized file
+                for fid in sel_faults:
+                    Zfid = export_with_gate(fid=fid, n_keep=export_per_class, steps=export_steps)
+                    arr = Zfid.numpy()
+                    # Save unit-norm (decision-space) version
                     np.save(os.path.join(results_dir, f"gen_f{fid}.npy"), arr)
                     merged[str(fid)] = arr
-                    print(f"[OK] Saved UNnormalized gen_f{fid}.npy (shape={arr.shape})")
+                    print(f"[OK] Saved gated gen_f{fid}.npy (shape={arr.shape})")
 
-                # Convenience combined file with only requested faults
-                np.save(os.path.join(results_dir, "gen_selected_unnorm.npy"), merged, allow_pickle=True)
-                print(f"[OK] Saved gen_selected_unnorm.npy for faults {selected_faults}")
+                # Also dump a combined dict for convenience
+                np.save(os.path.join(results_dir, "gen_selected.npy"), merged, allow_pickle=True)
+                print(f"[OK] Saved gen_selected.npy for faults {sel_faults}")
+
+                # ---- OPTIONAL: also save UNnormalized version using radius rescale if available
+                if hasattr(diffusion_model, "rescale_to_real_radii"):
+                    merged_un = {}
+                    for fid in sel_faults:
+                        Zhat = torch.as_tensor(merged[str(fid)], device=device, dtype=torch.float32)
+                        yhat = torch.full((Zhat.size(0),), fid, dtype=torch.long, device=device)
+                        Zun  = diffusion_model.rescale_to_real_radii(Zhat, yhat).cpu().numpy()
+                        np.save(os.path.join(results_dir, f"gen_f{fid}_unnorm.npy"), Zun)
+                        merged_un[str(fid)] = Zun
+                        print(f"[OK] Saved UNnormalized gen_f{fid}_unnorm.npy (shape={Zun.shape})")
+                    np.save(os.path.join(results_dir, "gen_selected_unnorm.npy"), merged_un, allow_pickle=True)
 
     except Exception as e:
         print(f"[WARN] Could not export diffusion embeddings: {e}")

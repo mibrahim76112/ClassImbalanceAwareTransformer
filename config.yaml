@@ -27,7 +27,7 @@ training:
     enabled: true
     start_epoch: 3
     synth_ratio: 0.2      
-    steps_infer: 24
+    steps_infer: 28
     epochs: 20          
     width: 512
     depth: 3
