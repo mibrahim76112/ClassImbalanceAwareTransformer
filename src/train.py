@@ -522,9 +522,13 @@ def main():
                 def export_with_gate(fid: int, n_keep: int, steps: int,
                                      chunk: int = 4096, max_rounds: int = 20):
                     gate = make_strict_gate(model, class_k=fid, device=device,
-                                            delta_logit=0.10, min_conf=0.65,
-                                            normal_label=0, centers_tensor=centers_np,
-                                            min_cos_to_k=0.70, max_cos_to_normal=0.40)
+                                            delta_logit=0.08,    # was 0.10
+                                            min_conf=0.55,       # was 0.65
+                                            normal_label=0,
+                                            centers_tensor=centers_np,
+                                            min_cos_to_k=0.60,   # was 0.70
+                                            max_cos_to_normal=0.55)  # was 0.40 (allow a bit closer to Normal)
+
                     kept = []
                     rounds = 0
                     while sum(k.size(0) for k in kept) < n_keep and rounds < max_rounds:
@@ -537,9 +541,11 @@ def main():
                         # if gate returns nothing this round, try again (up to max_rounds)
                     if kept:
                         Z = torch.cat(kept, dim=0)[:n_keep]
+                        print(f"[EXPORT] fault {fid}: kept {Z.size(0)} / {n_keep}")
                     else:
-                        Z = torch.empty((0, model.cos_head.W.size(0)))
-                    return Z
+                        Z = torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
+                        print(f"[EXPORT] fault {fid}: kept 0 / {n_keep} (gate too strict?)")
+
 
                 merged = {}
                 for fid in sel_faults:
