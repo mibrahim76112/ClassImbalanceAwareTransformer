@@ -460,14 +460,24 @@ def main():
             export_per_class = int(diff_cfg.get("export_per_class", 300))     # optional
 
             # Prefer regular sampler (so margin_gate can still be used if you add it).
-            sampler = getattr(diffusion_model, "ddim_sample", diffusion_model.ddim_sample)
+            sampler = getattr(diffusion_model, "ddim_sample_raw", None)
+            if sampler is None:
+                sampler = diffusion_model.ddim_sample  # fallback
 
             def _export_one_class(fid: int):
                 y_c = torch.full((export_per_class,), fid, dtype=torch.long, device=device)
                 with torch.no_grad():
-                    Zhat = sampler(y=y_c, n=export_per_class, steps=diff_steps_infer)   # unit-norm
-                    # --- NEW: rescale to empirical radii so we save UNnormalized samples
-                    Z = diffusion_model.rescale_to_real_radii(Zhat, y_c)
+                    Zhat = sampler(y=y_c, n=export_per_class, steps=diff_steps_infer)  # unit-norm
+
+                    # If for any reason nothing came back, skip cleanly
+                    if Zhat is None or Zhat.numel() == 0:
+                        print(f"[WARN] Export: sampler returned 0 rows for class {fid} — skipping.")
+                        return np.empty((0, feat_dim if 'feat_dim' in locals() else Zhat.shape[-1]), dtype=np.float32)
+
+                    # IMPORTANT: rescale with matching labels length
+                    y_match = y_c[:Zhat.size(0)]
+                    Z = diffusion_model.rescale_to_real_radii(Zhat, y_match)
+
                 arr = Z.detach().cpu().numpy()
                 np.save(os.path.join(results_dir, f"gen_f{fid}.npy"), arr)
                 print(f"[OK] Saved gen_f{fid}.npy (shape={arr.shape})")
