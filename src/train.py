@@ -521,34 +521,56 @@ def main():
 
                 def export_with_gate(fid: int, n_keep: int, steps: int,
                                     chunk: int = 4096, max_rounds: int = 20):
-                    gate = make_strict_gate(model, class_k=fid, device=device,
-                                            delta_logit=0.08,    # was 0.10
-                                            min_conf=0.55,       # was 0.65
-                                            normal_label=0,
-                                            centers_tensor=centers_np,
-                                            min_cos_to_k=0.60,   # was 0.70
-                                            max_cos_to_normal=0.55)  # was 0.40
 
-                    kept = []
-                    rounds = 0
-                    while sum(k.size(0) for k in kept) < n_keep and rounds < max_rounds:
-                        rounds += 1
-                        k = min(chunk, n_keep - sum(t.size(0) for t in kept))
-                        y_prop = torch.full((k,), fid, dtype=torch.long, device=device)
-                        Zprop  = sampler(y=y_prop, n=k, steps=steps, margin_gate=gate)
-                        if Zprop is not None and Zprop.numel():
-                            kept.append(Zprop.detach().cpu())
-                        # if gate returns nothing this round, try again (up to max_rounds)
+                    def build_gate(delta_logit, min_conf, min_cos_to_k, max_cos_to_normal):
+                        return make_strict_gate(
+                            model, class_k=fid, device=device,
+                            delta_logit=delta_logit,
+                            min_conf=min_conf,
+                            normal_label=0,
+                            centers_tensor=centers_np,          # keep this if you saved centers.npy
+                            min_cos_to_k=min_cos_to_k,
+                            max_cos_to_normal=max_cos_to_normal
+                        )
 
-                    if kept:
-                        Z = torch.cat(kept, dim=0)[:n_keep]
-                        print(f"[EXPORT] fault {fid}: kept {Z.size(0)} / {n_keep}")
-                    else:
-                        # empty tensor with correct feature dimension
-                        Z = torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
-                        print(f"[EXPORT] fault {fid}: kept 0 / {n_keep} (gate too strict?)")
+                    # 1) start strict
+                    settings = [
+                        dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30),
+                        # 2) medium
+                        dict(delta_logit=0.12, min_conf=0.70, min_cos_to_k=0.70, max_cos_to_normal=0.40),
+                        # 3) lenient (last resort)
+                        dict(delta_logit=0.08, min_conf=0.55, min_cos_to_k=0.55, max_cos_to_normal=0.55),
+                    ]
 
-                    return Z  
+                    kept = None
+                    for si, s in enumerate(settings, 1):
+                        gate = build_gate(**s)
+                        buf = []
+                        rounds = 0
+                        while sum(t.size(0) for t in buf) < n_keep and rounds < max_rounds:
+                            rounds += 1
+                            k = min(chunk, n_keep - sum(t.size(0) for t in buf))
+                            y_prop = torch.full((k,), fid, dtype=torch.long, device=device)
+                            Zprop  = sampler(y=y_prop, n=k, steps=steps, margin_gate=gate)
+                            if Zprop is not None and Zprop.numel():
+                                buf.append(Zprop.detach().cpu())
+
+                        tot = sum(t.size(0) for t in buf)
+                        if tot > 0:
+                            kept = torch.cat(buf, dim=0)[:n_keep]
+                            print(f"[EXPORT] fault {fid}: kept {kept.size(0)} / {n_keep} with gate setting #{si}")
+                            break
+                        else:
+                            print(f"[EXPORT] fault {fid}: kept 0 with gate setting #{si}, relaxing...")
+
+                    if kept is None:
+                        print(f"[EXPORT] fault {fid}: FAILED to keep any samples after all gate settings.")
+                        return torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
+
+                    return kept
+
+
+      
 
 
 

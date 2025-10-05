@@ -28,13 +28,13 @@ training:
     start_epoch: 3
     synth_ratio: 0.2      
     steps_infer: 28
-    epochs: 10          
+    epochs: 3          
     width: 512
     depth: 3
     margin_gate_delta: 0.05
     selected_faults: [5, 6]
     export_per_class: 300
-    export_steps_infer: 10
+    export_steps_infer: 40
 
 model:
   s: 16.0
