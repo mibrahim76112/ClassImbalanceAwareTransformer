@@ -42,6 +42,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="TEP classifier training (config-driven)")
     p.add_argument("--config", type=str, default=str(Path(__file__).parent.parent / "config.yaml"),
                    help="Path to config.yaml")
+                   
     p.add_argument("--ff-path", type=str, default=None)
     p.add_argument("--ft-path", type=str, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -475,13 +476,12 @@ def main():
                     centers_np = np.load(centers_path)
 
                 def make_strict_gate(model, class_k: int, device="cuda",
-                                    delta_logit=0.10,        # margin to runner-up (scaled by s)
-                                    min_conf=0.65,           # min softmax prob for class k
-                                    normal_label=0,          # which label is Normal
-                                    centers_tensor=None,     # optional (C,D)
-                                    min_cos_to_k=0.70,       # keep if cos >= this to class-k center
-                                    max_cos_to_normal=0.40   # reject if cos >= this to Normal center
-                                    ):
+                                    delta_logit=0.08,
+                                    min_conf=0.55,
+                                    normal_label=0,
+                                    centers_tensor=None,
+                                    min_cos_to_k=0.55,
+                                    max_cos_to_normal=0.55):
                     # cos_head.W is (C, D) -> normalize rows and transpose to (D, C)
                     W = model.cos_head.W.to(device)                          # (C, D)
                     W = torch.nn.functional.normalize(W, dim=1)              # normalize each class vector
@@ -520,27 +520,25 @@ def main():
                 device = next(model.parameters()).device
 
                 def export_with_gate(fid: int, n_keep: int, steps: int,
-                                    chunk: int = 4096, max_rounds: int = 20):
-
+                                    chunk: int = 8192, max_rounds: int = 60):
                     def build_gate(delta_logit, min_conf, min_cos_to_k, max_cos_to_normal):
                         return make_strict_gate(
                             model, class_k=fid, device=device,
                             delta_logit=delta_logit,
                             min_conf=min_conf,
                             normal_label=0,
-                            centers_tensor=centers_np,          # keep this if you saved centers.npy
+                            centers_tensor=centers_np,
                             min_cos_to_k=min_cos_to_k,
                             max_cos_to_normal=max_cos_to_normal
                         )
 
-                    # 1) start strict
                     settings = [
                         dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30),
-                        # 2) medium
                         dict(delta_logit=0.12, min_conf=0.70, min_cos_to_k=0.70, max_cos_to_normal=0.40),
-                        # 3) lenient (last resort)
                         dict(delta_logit=0.08, min_conf=0.55, min_cos_to_k=0.55, max_cos_to_normal=0.55),
+                        dict(delta_logit=0.05, min_conf=0.45, min_cos_to_k=0.45, max_cos_to_normal=0.70),
                     ]
+
 
                     kept = None
                     for si, s in enumerate(settings, 1):
