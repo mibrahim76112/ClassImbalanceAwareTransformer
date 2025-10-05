@@ -505,7 +505,7 @@ def main():
 
                         is_topk   = (logits.argmax(1) == class_k)
                         conf_ok   = (probs[:, class_k] >= min_conf)
-                        margin_ok = (top2[:, 0] - top2[:, 1] >= s * delta_logit)
+                        margin_ok = (top2[:, 0] - top2[:, 1] >=  delta_logit)
 
                         keep = is_topk & conf_ok & margin_ok
                         if Ck is not None:
@@ -520,7 +520,7 @@ def main():
                 device = next(model.parameters()).device
 
                 def export_with_gate(fid: int, n_keep: int, steps: int,
-                                    chunk: int = 8192, max_rounds: int = 60):
+                                    chunk: int = 8192, max_rounds: int = 40):
                     def build_gate(delta_logit, min_conf, min_cos_to_k, max_cos_to_normal):
                         return make_strict_gate(
                             model, class_k=fid, device=device,
@@ -533,11 +533,12 @@ def main():
                         )
 
                     settings = [
-                        dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30),
-                        dict(delta_logit=0.12, min_conf=0.70, min_cos_to_k=0.70, max_cos_to_normal=0.40),
-                        dict(delta_logit=0.08, min_conf=0.55, min_cos_to_k=0.55, max_cos_to_normal=0.55),
-                        dict(delta_logit=0.05, min_conf=0.45, min_cos_to_k=0.45, max_cos_to_normal=0.70),
-                    ]
+                                dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30),  # strict
+                                dict(delta_logit=0.10, min_conf=0.60, min_cos_to_k=0.60, max_cos_to_normal=0.50),  # medium
+                                dict(delta_logit=0.06, min_conf=0.50, min_cos_to_k=0.45, max_cos_to_normal=0.65),  # lenient+
+                                dict(delta_logit=0.05, min_conf=0.45, min_cos_to_k=0.45, max_cos_to_normal=0.65),
+                            ]
+
 
 
                     kept = None

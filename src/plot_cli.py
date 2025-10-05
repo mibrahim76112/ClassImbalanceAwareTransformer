@@ -28,6 +28,12 @@ def _exists(p): return p is not None and os.path.exists(p)
 
 def main():
     ap = argparse.ArgumentParser(description="Paper plots CLI (no-reliability)")
+
+    ap.add_argument("--normalize", default="zscore", choices=["none","unit","zscore","both"])
+    ap.add_argument("--normal-cap", type=int, default=350)
+    ap.add_argument("--fault-real-cap", type=int, default=20)
+    ap.add_argument("--perplexity", type=int, default=35)
+
     ap.add_argument("--results-dir", default="results")
     ap.add_argument(
         "--plots", nargs="+",
@@ -78,17 +84,23 @@ def main():
     if args.use_train:
         with open(args.config, "r") as f:
             _cfg = yaml.safe_load(f)
-        ws = _cfg["data_windowing"]["window_size"]
-        st = _cfg["data_windowing"]["stride"]
-        ff = _cfg["dataset"]["ff_path"]
-        ft = _cfg["dataset"]["ft_path"]
+        ws  = _cfg["data_windowing"]["window_size"]
+        st  = _cfg["data_windowing"]["stride"]
+        ff  = _cfg["dataset"]["ff_path"]
+        ft  = _cfg["dataset"]["ft_path"]
         pfs = _cfg["data_windowing"]["post_fault_start"]
         tr_start = _cfg["data_windowing"]["train_runs_start"]
-        tr_end = _cfg["data_windowing"]["train_runs_end"]
+        tr_end   = _cfg["data_windowing"]["train_runs_end"]
+        train_runs = range(tr_start, tr_end)
+
         (X_train_full, y_train_all, _), _ = load_sampled_data(
-            window_size=ws, stride=st, ff_path=ff, ft_path=ft,
-            post_fault_start=pfs, train_runs=range(tr_start, tr_end), test_runs=[]
+            window_size=ws, stride=st,
+            ff_path=ff, ft_path=ft,
+            post_fault_start=pfs,
+            train_runs=train_runs,
+            test_runs=train_runs
         )
+
         rng = np.random.default_rng(0)
         take_per_class = min(600, args.max_per_group)
         idx_sel = []
@@ -119,6 +131,7 @@ def main():
                 z = model.forward_features(xb).detach().cpu().numpy()
                 feats_list.append(z)
         feats_train = np.concatenate(feats_list, axis=0)
+
 
     wanted = set(args.plots)
     if "all" in wanted:
@@ -197,15 +210,20 @@ def main():
                 y_use = y_true
 
             plot_tsne_normal_fault6_generated(
-                feats_real=feats_use,
-                y_real=y_use.astype(int),
-                gen_fault6_feats=Z_gen,
-                normal_label=args.normal_label,
-                fault6_label=args.fault,
-                save_path=os.path.join(rd, f"tsne_norm_f{args.fault}_gen.png"),
-                max_per_group=args.max_per_group,
-                seed=0
-            )
+                            feats_real=feats_use,
+                            y_real=y_use.astype(int),
+                            gen_fault6_feats=Z_gen,
+                            normal_label=args.normal_label,
+                            fault6_label=args.fault,
+                            save_path=os.path.join(rd, f"tsne_norm_f{args.fault}_gen.png"),
+                            max_per_group=args.max_per_group,
+                            seed=0,
+                            normalize=args.normalize,
+                            normal_cap=args.normal_cap,
+                            fault_real_cap=args.fault_real_cap,
+                            perplexity=args.perplexity,
+                        )
+
             print(f"[OK] tsne_norm_f{args.fault}_gen.png")
         else:
             print("[SKIP] embed3: need features/labels from test or --use-train subset")

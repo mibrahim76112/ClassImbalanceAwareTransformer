@@ -307,6 +307,7 @@ def plot_effective_training_distribution(train_counts, synth_counts,
     ax2.legend(loc="upper right")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
+
 def plot_tsne_normal_fault6_generated(
     feats_real,
     y_real,
@@ -316,56 +317,90 @@ def plot_tsne_normal_fault6_generated(
     save_path="results/tsne_norm_f6_gen.png",
     max_per_group=650,
     seed=0,
-    normalize="both",          # <--- NEW: "both" or "none"
+    normalize="zscore",
+    normal_cap=350,
+    fault_real_cap=20,
+    perplexity=35,
 ):
-    """
-    Makes a t-SNE with exactly three clouds:
-      - Normal (real)
-      - Fault (real)
-      - Fault Generated (synthetic)
-    """
-    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    import numpy as np
+    from sklearn.manifold import TSNE
+    from sklearn.preprocessing import StandardScaler
+    import matplotlib.pyplot as plt
+
     rng = np.random.default_rng(seed)
 
-    idx_norm = np.where(y_real == normal_label)[0]
-    idx_f    = np.where(y_real == fault6_label)[0]
+    idx_norm = np.where(y_real == int(normal_label))[0]
+    idx_fault = np.where(y_real == int(fault6_label))[0]
 
-    def _pick(idx, K):
-        return rng.choice(idx, size=min(K, len(idx)), replace=False) if len(idx) > K else idx
+    if len(idx_norm) == 0 or len(idx_fault) == 0:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig, ax = plt.subplots(figsize=(7.5, 5.5))
+        ax.text(0.5, 0.5, "no data for requested classes", ha="center", va="center")
+        plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
+        return
 
-    idx_norm = _pick(idx_norm, max_per_group)
-    idx_f    = _pick(idx_f,    max_per_group)
+    if len(idx_norm) > normal_cap:
+        idx_norm = rng.choice(idx_norm, size=normal_cap, replace=False)
 
-    X_norm = feats_real[idx_norm]
-    X_f    = feats_real[idx_f]
-    X_gen  = np.asarray(gen_fault6_feats) if gen_fault6_feats is not None else np.empty((0, X_norm.shape[1]))
+    if len(idx_fault) > fault_real_cap:
+        idx_fault = rng.choice(idx_fault, size=fault_real_cap, replace=False)
 
-    # --- NEW: optional L2 normalization (recommended) ---
-    if normalize == "both":
-        def _l2n(a, eps=1e-12):
-            n = np.linalg.norm(a, axis=1, keepdims=True)
-            return a / np.clip(n, eps, None)
-        if X_norm.size: X_norm = _l2n(X_norm)
-        if X_f.size:    X_f    = _l2n(X_f)
-        if X_gen.size:  X_gen  = _l2n(X_gen)
+    Xn = feats_real[idx_norm]
+    Xf = feats_real[idx_fault]
 
-    X_all = np.concatenate([X_norm, X_f, X_gen], axis=0)
-    Z_all = TSNE(n_components=2, learning_rate="auto", init="random",
-                 perplexity=35, random_state=seed).fit_transform(X_all)
+    G = np.asarray(gen_fault6_feats) if gen_fault6_feats is not None else np.empty((0, Xn.shape[1]))
+    if G.shape[0] > max_per_group:
+        sel_g = rng.choice(np.arange(G.shape[0]), size=max_per_group, replace=False)
+        G = G[sel_g]
 
-    n_norm = len(X_norm); n_f = len(X_f)
-    a = 0; b = a + n_norm; c = b + n_f
-    Z_norm, Z_f, Z_gen = Z_all[a:b], Z_all[b:c], Z_all[c:]
+    def l2n(a, eps=1e-12):
+        n = np.linalg.norm(a, axis=1, keepdims=True)
+        return a / np.clip(n, eps, None)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.scatter(Z_norm[:,0], Z_norm[:,1], s=10, c="#1f77b4", label="Normal")
-    ax.scatter(Z_f[:,0],    Z_f[:,1],    s=18, c="#ff7f0e", label=f"Fault {fault6_label}")
-    if len(Z_gen):
-        ax.scatter(Z_gen[:,0], Z_gen[:,1], s=18, c="#2ca02c", label=f"Fault {fault6_label} Generated")
-    ax.legend(frameon=True, loc="best")
+    if normalize.lower() in ("unit", "both"):
+        if Xn.size: Xn = l2n(Xn)
+        if Xf.size: Xf = l2n(Xf)
+        if G.size:  G  = l2n(G)
+
+    if normalize.lower() in ("zscore", "both"):
+        ref = np.vstack([Xn, Xf]) if Xn.size and Xf.size else (Xn if Xn.size else Xf)
+        scaler = StandardScaler().fit(ref)
+        if Xn.size: Xn = scaler.transform(Xn)
+        if Xf.size: Xf = scaler.transform(Xf)
+        if G.size:  G  = scaler.transform(G)
+
+    X_all = np.vstack([Xn, Xf, G]) if G.size else np.vstack([Xn, Xf])
+    y_all = np.hstack([
+        np.zeros(len(Xn), dtype=int),
+        np.ones(len(Xf), dtype=int),
+        np.full(len(G), 2, dtype=int)
+    ]) if G.size else np.hstack([
+        np.zeros(len(Xn), dtype=int),
+        np.ones(len(Xf), dtype=int)
+    ])
+
+    n_total = X_all.shape[0]
+    perp = int(max(5, min(perplexity, (n_total - 1) // 3))) if n_total > 10 else 5
+
+    Z = TSNE(
+        n_components=2,
+        init="random",
+        learning_rate="auto",
+        perplexity=perp,
+        early_exaggeration=20.0,
+        n_iter=1500,
+        random_state=seed,
+    ).fit_transform(X_all)
+
+    fig, ax = plt.subplots(figsize=(7.8, 5.6))
+    ax.scatter(Z[y_all==0,0], Z[y_all==0,1], s=18, label="Normal")
+    ax.scatter(Z[y_all==1,0], Z[y_all==1,1], s=26, label=f"Fault {fault6_label}")
+    if (y_all == 2).any():
+        ax.scatter(Z[y_all==2,0], Z[y_all==2,1], s=22, label=f"Fault {fault6_label} Generated")
+    ax.legend(loc="best", frameon=True)
     ax.set_title("t-SNE: Normal vs Fault vs Generated")
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
-
 
 # === NEW: t-SNE Normal vs Fault-k vs Generated ===
 def plot_tsne_triplet(
