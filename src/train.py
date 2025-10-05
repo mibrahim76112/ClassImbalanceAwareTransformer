@@ -520,14 +520,14 @@ def main():
                 device = next(model.parameters()).device
 
                 def export_with_gate(fid: int, n_keep: int, steps: int,
-                                     chunk: int = 4096, max_rounds: int = 20):
+                                    chunk: int = 4096, max_rounds: int = 20):
                     gate = make_strict_gate(model, class_k=fid, device=device,
                                             delta_logit=0.08,    # was 0.10
                                             min_conf=0.55,       # was 0.65
                                             normal_label=0,
                                             centers_tensor=centers_np,
                                             min_cos_to_k=0.60,   # was 0.70
-                                            max_cos_to_normal=0.55)  # was 0.40 (allow a bit closer to Normal)
+                                            max_cos_to_normal=0.55)  # was 0.40
 
                     kept = []
                     rounds = 0
@@ -539,12 +539,17 @@ def main():
                         if Zprop is not None and Zprop.numel():
                             kept.append(Zprop.detach().cpu())
                         # if gate returns nothing this round, try again (up to max_rounds)
+
                     if kept:
                         Z = torch.cat(kept, dim=0)[:n_keep]
                         print(f"[EXPORT] fault {fid}: kept {Z.size(0)} / {n_keep}")
                     else:
+                        # empty tensor with correct feature dimension
                         Z = torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
                         print(f"[EXPORT] fault {fid}: kept 0 / {n_keep} (gate too strict?)")
+
+                    return Z  
+
 
 
                 merged = {}
