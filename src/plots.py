@@ -3,13 +3,15 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
-    classification_report,
+    confusion_matrix, classification_report,
     accuracy_score, balanced_accuracy_score, f1_score
 )
 from sklearn.manifold import TSNE
 
+
 @torch.no_grad()
 def get_preds_and_logits(model, loader, device):
+    """Return y_true, y_pred, logits (CPU)."""
     model.eval()
     ys, ps, ls = [], [], []
     for x, y in loader:
@@ -25,6 +27,7 @@ def get_preds_and_logits(model, loader, device):
 
 @torch.no_grad()
 def get_features(model, loader, device):
+    """Return (feats, y) from forward_features()."""
     model.eval()
     feats_all, ys = [], []
     for x, y in loader:
@@ -67,6 +70,7 @@ def plot_class_dist_and_margins(y_train, model,
 
     plt.title("Class counts and per-class margins")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
+
 
 def per_class_report(y_true, y_pred):
     rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
@@ -131,6 +135,7 @@ def plot_embedding(feats, y, method="umap",
         except Exception:
             method = "tsne"
     if method.lower() == "tsne":
+       
         Z = TSNE(n_components=2, learning_rate="auto", init="random",
                  perplexity=35, random_state=seed).fit_transform(X)
 
@@ -174,9 +179,15 @@ def plot_inter_intra_distributions(feats, y, centers,
     ax.set_title("Intra vs. Inter-class distance distributions")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
+
 def plot_ce_loss(history, save_path="results/ce_loss.png"):
+    """
+    Single-panel plot for cross-entropy (train) only.
+    Needs: history['epoch'], history['train_ce']
+    """
     _ensure_dir(os.path.dirname(save_path) or ".")
     ep = history.get("epoch", list(range(1, len(history.get("train_ce", [])) + 1)))
+
     fig, ax = plt.subplots(figsize=(8,4))
     if "train_ce" in history and len(history["train_ce"]):
         ax.plot(ep, history["train_ce"], label="Train CE")
@@ -189,7 +200,12 @@ def plot_ce_loss(history, save_path="results/ce_loss.png"):
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
 
+
 def plot_validation_metrics(history, save_path="results/val_metrics.png"):
+    """
+    Validation metrics only (no lambda, no SupCon).
+    Plots any of the available keys: val_acc, val_bal_acc, val_macro_f1.
+    """
     _ensure_dir(os.path.dirname(save_path) or ".")
     L = max(
         len(history.get("val_acc", [])),
@@ -198,6 +214,7 @@ def plot_validation_metrics(history, save_path="results/val_metrics.png"):
         1
     )
     ep = history.get("epoch", list(range(1, L + 1)))
+
     fig, ax = plt.subplots(figsize=(9,4.5))
     if "val_macro_f1" in history and len(history["val_macro_f1"]):
         ax.plot(ep, history["val_macro_f1"], label="Val Macro-F1")
@@ -205,6 +222,7 @@ def plot_validation_metrics(history, save_path="results/val_metrics.png"):
         ax.plot(ep, history["val_bal_acc"], label="Val Balanced Acc.")
     if "val_acc" in history and len(history["val_acc"]):
         ax.plot(ep, history["val_acc"], label="Val Acc")
+
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Metric")
     ax.set_title("Validation Metrics")
@@ -222,10 +240,18 @@ def summarize_metrics(y_true, y_pred):
         "macro_f1": f1_score(y_true, y_pred, average="macro"),
     }
 
+# =========================
+# NEW: Diffusion balancing plots
+# =========================
 def plot_real_vs_diffusion_counts(train_counts, synth_counts,
                                   save_path="results/diffusion_balance_counts.png"):
+    """
+    Side-by-side bars of real (raw) vs. diffusion-synthetic counts per class.
+    'After' = real + synthetic. Highlights how diffusion equalizes classes.
+    """
     _ensure_dir(os.path.dirname(save_path) or ".")
     import numpy as np
+
     C = max(len(train_counts), len(synth_counts))
     real = np.array(train_counts, dtype=float)
     synth = np.array(synth_counts, dtype=float)
@@ -245,10 +271,16 @@ def plot_real_vs_diffusion_counts(train_counts, synth_counts,
     ax.legend()
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
+
 def plot_effective_training_distribution(train_counts, synth_counts,
                                          save_path="results/diffusion_effective_distribution.png"):
+    """
+    Stacked bars per class: fraction synthetic vs real in the effective training mix.
+    Also overlays the PRE vs POST normalized distributions for comparison.
+    """
     _ensure_dir(os.path.dirname(save_path) or ".")
     import numpy as np
+
     real = np.array(train_counts, dtype=float)
     synth = np.array(synth_counts, dtype=float)
     C = max(len(real), len(synth))
@@ -284,8 +316,14 @@ def plot_tsne_normal_fault6_generated(
     save_path="results/tsne_norm_f6_gen.png",
     max_per_group=650,
     seed=0,
-    normalize="both",
+    normalize="both",          # <--- NEW: "both" or "none"
 ):
+    """
+    Makes a t-SNE with exactly three clouds:
+      - Normal (real)
+      - Fault (real)
+      - Fault Generated (synthetic)
+    """
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     rng = np.random.default_rng(seed)
 
@@ -302,6 +340,7 @@ def plot_tsne_normal_fault6_generated(
     X_f    = feats_real[idx_f]
     X_gen  = np.asarray(gen_fault6_feats) if gen_fault6_feats is not None else np.empty((0, X_norm.shape[1]))
 
+    # --- NEW: optional L2 normalization (recommended) ---
     if normalize == "both":
         def _l2n(a, eps=1e-12):
             n = np.linalg.norm(a, axis=1, keepdims=True)
@@ -327,14 +366,22 @@ def plot_tsne_normal_fault6_generated(
     ax.set_title("t-SNE: Normal vs Fault vs Generated")
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
+
+# === NEW: t-SNE Normal vs Fault-k vs Generated ===
 def plot_tsne_triplet(
     feats, y, gen, fault_id,
     save_path="results/embed_fault_triplet.png",
-    normalize="both",
+    normalize="both",           # "both" or "none"
     max_per_class=600,
     seed=0,
     perplexity=35
 ):
+    """
+    t-SNE of three groups:
+      - Normal (class 0)
+      - Real Fault `fault_id`
+      - Generated for `fault_id` (already sampled)
+    """
     import numpy as np
     from sklearn.manifold import TSNE
     import matplotlib.pyplot as plt
@@ -345,11 +392,14 @@ def plot_tsne_triplet(
 
     rng = np.random.default_rng(seed)
 
+    # Select normal + fault_k
     idx_norm = np.where(y == 0)[0]
     idx_fk   = np.where(y == int(fault_id))[0]
+
     if len(idx_norm) == 0 or len(idx_fk) == 0 or gen is None or len(gen) == 0:
         raise ValueError("Missing data for plot_tsne_triplet (normal/fault/gen).")
 
+    # Subsample for speed/clarity
     if len(idx_norm) > max_per_class:
         idx_norm = rng.choice(idx_norm, size=max_per_class, replace=False)
     if len(idx_fk) > max_per_class:
@@ -362,18 +412,25 @@ def plot_tsne_triplet(
     Gk = gen
 
     if normalize == "both":
-        Xn = _l2n(Xn); Xk = _l2n(Xk); Gk = _l2n(Gk)
+        Xn = _l2n(Xn)
+        Xk = _l2n(Xk)
+        Gk = _l2n(Gk)
 
+    # Stack and embed
     X_all = np.vstack([Xn, Xk, Gk])
     y_all = np.hstack([
-        np.zeros(len(Xn), dtype=int),
-        np.ones(len(Xk), dtype=int),
-        np.full(len(Gk), 2, dtype=int)
+        np.zeros(len(Xn), dtype=int),                      # 0 = Normal
+        np.ones(len(Xk), dtype=int),                       # 1 = Real Fault k
+        np.full(len(Gk), 2, dtype=int)                     # 2 = Generated Fault k
     ])
 
-    Z = TSNE(n_components=2, learning_rate="auto", init="random",
-             perplexity=perplexity, random_state=seed).fit_transform(X_all)
+    Z = TSNE(
+        n_components=2, learning_rate="auto", init="random",
+        perplexity=perplexity, random_state=seed
+    ).fit_transform(X_all)
 
+    # Plot
+    import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(7, 5.5))
     ax.scatter(Z[y_all==0,0], Z[y_all==0,1], s=14, label="Normal", alpha=0.85)
     ax.scatter(Z[y_all==1,0], Z[y_all==1,1], s=14, label=f"Fault {fault_id}", alpha=0.85)
