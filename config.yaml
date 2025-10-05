@@ -33,6 +33,7 @@ training:
     depth: 3
     margin_gate_delta: 0.05
     selected_faults: [5, 6]
+    export_per_class: 300
 
 model:
   s: 16.0
