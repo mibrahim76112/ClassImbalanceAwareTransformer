@@ -452,56 +452,61 @@ def main():
                         centers.centers.detach().cpu().numpy())
     except Exception:
         pass
-    # ===== Export diffusion-generated embeddings (config-driven, UNnormalized via rescale) =====
+        # ===== Export diffusion-generated embeddings (UNnormalized for selected faults) =====
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
-            selected_faults = diff_cfg.get("selected_faults", None)           # e.g., [5,6,8,13]
-            export_per_class = int(diff_cfg.get("export_per_class", 300))     # optional
+            selected_faults = diff_cfg.get("selected_faults", None)           # e.g., [5, 6, 8, 13]
+            export_per_class = int(diff_cfg.get("export_per_class", 300))
+            export_steps = int(diff_cfg.get("export_steps_infer", diff_steps_infer))
 
-            # Prefer regular sampler (so margin_gate can still be used if you add it).
-            sampler = getattr(diffusion_model, "ddim_sample_raw", None)
-            if sampler is None:
-                sampler = diffusion_model.ddim_sample  # fallback
-
-            def _export_one_class(fid: int):
-                y_c = torch.full((export_per_class,), fid, dtype=torch.long, device=device)
-                with torch.no_grad():
-                    Zhat = sampler(y=y_c, n=export_per_class, steps=diff_steps_infer)  # unit-norm
-
-                    # If for any reason nothing came back, skip cleanly
-                    if Zhat is None or Zhat.numel() == 0:
-                        print(f"[WARN] Export: sampler returned 0 rows for class {fid} — skipping.")
-                        return np.empty((0, feat_dim if 'feat_dim' in locals() else Zhat.shape[-1]), dtype=np.float32)
-
-                    # IMPORTANT: rescale with matching labels length
-                    y_match = y_c[:Zhat.size(0)]
-                    Z = diffusion_model.rescale_to_real_radii(Zhat, y_match)
-
-                arr = Z.detach().cpu().numpy()
-                np.save(os.path.join(results_dir, f"gen_f{fid}.npy"), arr)
-                print(f"[OK] Saved gen_f{fid}.npy (shape={arr.shape})")
-                return arr
-
-            if selected_faults:
-                # Generate only requested faults; also write a merged convenience file
-                all_data = {}
-                for f_id in selected_faults:
-                    f_id = int(f_id)
-                    all_data[str(f_id)] = _export_one_class(f_id)
-                np.save(os.path.join(results_dir, "gen_selected.npy"), all_data, allow_pickle=True)
-                print(f"[OK] Combined file gen_selected.npy with faults {selected_faults}")
+            if not selected_faults:
+                print("[EXPORT] No 'selected_faults' in config; skipping unnormalized export.")
             else:
-                # Back-compat: generate all classes (may take time)
-                C = int(y_train.max()) + 1
-                gen_by_class = {}
-                for c in range(C):
-                    gen_by_class[str(c)] = _export_one_class(c)
-                np.save(os.path.join(results_dir, "gen_all.npy"), gen_by_class, allow_pickle=True)
-                print(f"[OK] Saved gen_all.npy (all classes)")
+                # Always use the RAW sampler so we actually get n samples (no quotas/empty returns)
+                sampler = getattr(diffusion_model, "ddim_sample_raw", None)
+                if sampler is None:
+                    sampler = diffusion_model.ddim_sample
+
+                # Prefer accurate per-sample rescale; fall back to mean; else warn & save normalized
+                has_rescale = hasattr(diffusion_model, "rescale_to_real_radii")
+                has_rescale_mean = hasattr(diffusion_model, "rescale_to_real_radii_mean")
+
+                merged = {}
+                for fid in [int(x) for x in selected_faults]:
+                    y_c = torch.full((export_per_class,), fid, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        Zhat = sampler(y=y_c, n=export_per_class, steps=export_steps)  # unit-norm
+
+                        if Zhat is None or Zhat.numel() == 0:
+                            print(f"[WARN] Export: sampler returned 0 rows for class {fid}; skipping.")
+                            arr = np.empty((0, Zhat.shape[-1] if Zhat is not None else feat_dim), dtype=np.float32)
+                        else:
+                            # Trim labels to match returned rows (safety)
+                            y_match = y_c[:Zhat.size(0)]
+
+                            if has_rescale:
+                                Z = diffusion_model.rescale_to_real_radii(Zhat, y_match)  # match empirical dist
+                            elif has_rescale_mean:
+                                Z = diffusion_model.rescale_to_real_radii_mean(Zhat, y_match)  # fast mean radius
+                            else:
+                                print(f"[WARN] Export: no rescale helper found; saving NORMALIZED samples for class {fid}.")
+                                Z = Zhat
+
+                            arr = Z.detach().cpu().numpy()
+
+                    # Save per-fault UNnormalized file
+                    np.save(os.path.join(results_dir, f"gen_f{fid}.npy"), arr)
+                    merged[str(fid)] = arr
+                    print(f"[OK] Saved UNnormalized gen_f{fid}.npy (shape={arr.shape})")
+
+                # Convenience combined file with only requested faults
+                np.save(os.path.join(results_dir, "gen_selected_unnorm.npy"), merged, allow_pickle=True)
+                print(f"[OK] Saved gen_selected_unnorm.npy for faults {selected_faults}")
 
     except Exception as e:
         print(f"[WARN] Could not export diffusion embeddings: {e}")
+
 
 
 
