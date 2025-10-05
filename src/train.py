@@ -452,7 +452,9 @@ def main():
                         centers.centers.detach().cpu().numpy())
     except Exception:
         pass
-        # ===== Export diffusion-generated embeddings (gated, unit-norm; optional unnorm) =====
+    
+    
+       # ===== Export diffusion-generated embeddings (gated, unit-norm; optional unnorm) =====
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
@@ -466,9 +468,7 @@ def main():
                 # raw sampler (supports margin_gate and never short-circuits for quotas)
                 sampler = getattr(diffusion_model, "ddim_sample_raw", diffusion_model.ddim_sample)
 
-                # ---- Build a strong gate for a given class id
-                # (No inner imports here—torch and F are already imported at top of file)
-                # load centers if available (optional but improves gating)
+                # ---- centers (optional for tighter gating)
                 centers_np = None
                 centers_path = os.path.join(results_dir, "centers.npy")
                 if os.path.exists(centers_path):
@@ -482,25 +482,27 @@ def main():
                                      min_cos_to_k=0.70,       # keep if cos >= this to class-k center
                                      max_cos_to_normal=0.40   # reject if cos >= this to Normal center
                                      ):
-                    W = F.normalize(model.cos_head.W.to(device), dim=0)   # (D,C)
+                    # W: (D, C), z: (N, D) — all L2-normalized before cosine
+                    W = torch.nn.functional.normalize(model.cos_head.W.to(device), dim=0)
                     s = float(getattr(model.cos_head, "s", 30.0))
                     Ck = Cn = None
                     if centers_tensor is not None:
                         ct = torch.as_tensor(centers_tensor, dtype=torch.float32, device=device)
-                        ct = F.normalize(ct, dim=-1)
+                        ct = torch.nn.functional.normalize(ct, dim=-1)
                         if 0 <= class_k < ct.size(0):
                             Ck = ct[class_k]
                         if 0 <= normal_label < ct.size(0):
                             Cn = ct[normal_label]
 
                     def gate(z, y):
-                        z = F.normalize(z, dim=-1)
-                        logits = s * (z @ W)                  # (N,C)
-                        probs  = torch.softmax(logits, dim=1) # (N,C)
+                        # normalize samples
+                        z = torch.nn.functional.normalize(z, dim=-1)
+                        logits = s * (z @ W)                  # (N, C)
+                        probs  = torch.softmax(logits, dim=1) # (N, C)
                         top2   = torch.topk(logits, 2, dim=1).values
                         is_topk   = (logits.argmax(1) == class_k)
                         conf_ok   = (probs[:, class_k] >= min_conf)
-                        margin_ok = (top2[:,0] - top2[:,1] >= s * delta_logit)
+                        margin_ok = (top2[:, 0] - top2[:, 1] >= s * delta_logit)
                         keep = is_topk & conf_ok & margin_ok
                         if Ck is not None:
                             keep = keep & ((z @ Ck) >= min_cos_to_k)
@@ -511,7 +513,8 @@ def main():
 
                 device = next(model.parameters()).device
 
-                def export_with_gate(fid: int, n_keep: int, steps: int, chunk: int = 4096, max_rounds: int = 20):
+                def export_with_gate(fid: int, n_keep: int, steps: int,
+                                     chunk: int = 4096, max_rounds: int = 20):
                     gate = make_strict_gate(model, class_k=fid, device=device,
                                             delta_logit=0.10, min_conf=0.65,
                                             normal_label=0, centers_tensor=centers_np,
@@ -559,6 +562,7 @@ def main():
 
     except Exception as e:
         print(f"[WARN] Could not export diffusion embeddings: {e}")
+
 
 
 

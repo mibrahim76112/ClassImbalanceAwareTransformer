@@ -6,9 +6,9 @@ data_windowing:
   window_size: 100
   stride: 5
   normal_train_start: 0
-  normal_train_end:   42000
-  normal_test_start:  42000
-  normal_test_end:    44000
+  normal_train_end: 30000
+  normal_test_start: 30000
+  normal_test_end: 32000
   post_fault_start: 100         
   train_runs_start: 1
   train_runs_end: 35
@@ -28,7 +28,7 @@ training:
     start_epoch: 3
     synth_ratio: 0.2      
     steps_infer: 28
-    epochs: 20          
+    epochs: 10          
     width: 512
     depth: 3
     margin_gate_delta: 0.05
