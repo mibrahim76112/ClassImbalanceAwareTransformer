@@ -40,8 +40,7 @@ def pretty_print_metrics(tag, m):
 
 def parse_args():
     p = argparse.ArgumentParser(description="TEP classifier training (config-driven)")
-    p.add_argument("--config", type=str, default=str(Path(__file__).parent.parent / "config.yaml"),
-                   help="Path to config.yaml")
+    p.add_argument("--config", type=str, default=str(Path(__file__).parent.parent / "config.yaml"))
     p.add_argument("--ff-path", type=str, default=None)
     p.add_argument("--ft-path", type=str, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -53,18 +52,11 @@ def parse_args():
     p.add_argument("--stride", type=int, default=None)
     p.add_argument("--post-fault-start", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--results-dir", type=str, default=None,
-               help="Where to save artifacts (overrides YAML)")
-
-    p.add_argument("--baseline", action="store_true",
-                help="Use only the linear classifier (no cosine head / contrastive / centers)")
-    p.add_argument("--arcface-only", action="store_true",
-               help="Use cosine-margin head with CE only (disables SupCon and center losses)")
-    p.add_argument("--smote", action="store_true",
-                   help="Apply SMOTE to training windows after split (avoid using WeightedRandomSampler then)")
-    p.add_argument("--smote-ratio", type=float, default=None,
-                   help="Target per-class size as a fraction of the majority (e.g., 0.5). If omitted, upsample minorities to majority.")
-
+    p.add_argument("--results-dir", type=str, default=None)
+    p.add_argument("--baseline", action="store_true")
+    p.add_argument("--arcface-only", action="store_true")
+    p.add_argument("--smote", action="store_true")
+    p.add_argument("--smote-ratio", type=float, default=None)
     return p.parse_args()
 
 def set_seed(seed: int):
@@ -72,19 +64,11 @@ def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-
-# ------------------------
-# Plain CE training (baseline)
-# ------------------------
 def _to_jsonable(x):
-    if isinstance(x, np.ndarray):
-        return x.tolist()
-    if isinstance(x, (np.floating, np.integer)):
-        return x.item()
-    if isinstance(x, dict):
-        return {k: _to_jsonable(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_to_jsonable(v) for v in x]
+    if isinstance(x, np.ndarray): return x.tolist()
+    if isinstance(x, (np.floating, np.integer)): return x.item()
+    if isinstance(x, dict): return {k: _to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)): return [_to_jsonable(v) for v in x]
     return x
 
 def train_one_epoch_ce(model, loader, opt, device):
@@ -102,13 +86,11 @@ def train_one_epoch_ce(model, loader, opt, device):
         bs = y.size(0); tot += bs; tot_loss += loss.item() * bs
     return tot_loss / max(1, tot)
 
-
 def main():
     args = parse_args()
     if args.baseline and args.arcface_only:
         raise ValueError("Choose either --baseline or --arcface-only, not both.")
 
-    # ---- Load YAML config
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         raise FileNotFoundError(f"Config not found: {cfg_path}")
@@ -137,13 +119,11 @@ def main():
     test_bs     = args.test_batch or cfg["training"]["batch"]["test"]
     num_workers = args.num_workers or cfg["training"]["num_workers"]
 
-    # ---- Data load
     (X_train, y_train, _), (X_test, y_test, _) = load_sampled_data(
         window_size=window_size, stride=stride, ff_path=ff_path, ft_path=ft_path,
         post_fault_start=post_fault_start, train_runs=train_runs, test_runs=test_runs
     )
 
-    from sklearn.model_selection import StratifiedShuffleSplit
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.15, random_state=seed)
     (train_idx, val_idx), = sss.split(X_train, y_train)
     X_tr, y_tr = X_train[train_idx], y_train[train_idx]
@@ -159,26 +139,20 @@ def main():
         uniq = np.unique(y_tr)
 
         if args.smote_ratio is None:
-            sampling_strategy = "not majority"  
-            target_descr = f"to majority ({majority})"
+            sampling_strategy = "not majority"
         else:
             target = max(1, int(round(majority * float(args.smote_ratio))))
             sampling_strategy = {int(c): target for c in uniq if counts[int(c)] < target}
-            target_descr = f"to ratio {args.smote_ratio} × majority (~{target})"
-
-        min_minority = counts[counts > 0].min()
-        k_neighbors = max(1, min(5, int(min_minority) - 1))
-        print(f"[SMOTE] Upsampling minorities {target_descr}; k_neighbors={k_neighbors}")
 
         N, T, F = X_tr.shape
         X2d = X_tr.reshape(N, T * F).astype(np.float32)
+        min_minority = counts[counts > 0].min()
+        k_neighbors = max(1, min(5, int(min_minority) - 1))
         sm = SMOTE(sampling_strategy=sampling_strategy, k_neighbors=k_neighbors, random_state=seed)
         X_res, y_res = sm.fit_resample(X2d, y_tr)
         X_tr, y_tr = X_res.reshape(-1, T, F), y_res
+        use_weighted_sampler = False
 
-        use_weighted_sampler = False 
-
-    # ---- Datasets
     use_cuda = torch.cuda.is_available()
     use_pin_memory = use_cuda
 
@@ -199,7 +173,6 @@ def main():
             persistent_workers=True, prefetch_factor=2
         )
 
-    # VAL/TEST loaders: set workers to 0 (light)
     val_loader = torch.utils.data.DataLoader(
         PlainTSDataset(X_val, y_val), batch_size=val_bs, shuffle=False,
         num_workers=0, pin_memory=use_pin_memory
@@ -209,10 +182,8 @@ def main():
         num_workers=0, pin_memory=use_pin_memory
     )
 
-    # ---- Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ---- Model
     model = SelfGatedHierarchicalTransformerEncoder(
         input_dim=X_train.shape[2], num_classes=int(y_train.max())+1
     ).to(device)
@@ -235,7 +206,6 @@ def main():
             margin_type=str(cfg["model"]["margin_type"])
         ).to(device)
 
-        # per-class margin targets (will be warmed up each epoch)
         per_m = torch.full((num_classes,), float(cfg["model"]["m"]), device=device)
         for k, v in (cfg.get("model", {}).get("per_class_margin_overrides", {}) or {}).items():
             idx = int(k)
@@ -264,11 +234,10 @@ def main():
 
         opt = torch.optim.AdamW([
             {"params": [p for n, p in model.named_parameters() if not n.startswith("cos_head.")],
-            "lr": 3e-4, "weight_decay": 1e-4},
+             "lr": 3e-4, "weight_decay": 1e-4},
             {"params": [model.cos_head.W], "lr": 3e-4, "weight_decay": 5e-5},
         ], lr=3e-4, weight_decay=0.0)
-    
-        # === Diffusion config ===
+
         diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
         use_diffusion = bool(diff_cfg.get("enabled", False))
         start_ep = int(diff_cfg.get("start_epoch", 3))
@@ -278,21 +247,16 @@ def main():
         diff_width = int(diff_cfg.get("width", 512))
         diff_depth = int(diff_cfg.get("depth", 3))
         margin_gate_delta = float(diff_cfg.get("margin_gate_delta", 0.05))
-        autobalance = bool(diff_cfg.get("autobalance", True))  # NEW: default on
+        autobalance = bool(diff_cfg.get("autobalance", True))
+        diffusion_model = None
 
-        diffusion_model = None   # will be trained later if enabled
+    gen_counter = defaultdict(int)
+    aug_stats = {"per_epoch_synth_counts": [], "num_classes": int(y_train.max()) + 1}
 
-    # ---- Augmentation accounting
-    gen_counter = defaultdict(int)                 # per-epoch accumulation hook
-    aug_stats = {"per_epoch_synth_counts": [],     # list of lists, length = num_classes
-                 "num_classes": int(y_train.max()) + 1}
-
-    # ---- Quota for exact “balance to majority” (NEW)
     train_counts = np.bincount(y_train.astype(int), minlength=int(y_train.max()) + 1)
     majority = int(train_counts.max())
     quota = {int(c): int(max(0, majority - cnt)) for c, cnt in enumerate(train_counts.tolist())}
 
-    # ---- Train
     best_bal_acc, best_state = 0.0, None
     history = {
         "epoch": [],
@@ -304,17 +268,15 @@ def main():
         "val_macro_f1": []
     }
     for epoch in range(1, epochs + 1):
-
         if (not args.baseline) and use_diffusion and (epoch == start_ep):
             print("[Diffusion] Training decision-space diffusion (streaming)...")
             model.eval()
 
-            # Real-only, single-view dataset for feature extraction (no augments)
             feat_loader = torch.utils.data.DataLoader(
                 PlainTSDataset(X_tr, y_tr),
                 batch_size=val_bs,
                 shuffle=False,
-                num_workers=0,           
+                num_workers=0,
                 pin_memory=True
             )
 
@@ -331,13 +293,13 @@ def main():
                 steps_infer=diff_steps_infer,
                 width=diff_width,
                 depth=diff_depth,
-                use_project=False,        
+                use_project=False,
                 amp_enabled=True,
                 microbatch=256,
                 log_every=200,
                 gen_counter=gen_counter,
                 quota=quota,
-                auto_balance_to_majority=autobalance,   # <--- AUTO BALANCE
+                auto_balance_to_majority=autobalance,
             )
 
             model.train()
@@ -346,7 +308,6 @@ def main():
             ce = train_one_epoch_ce(model, train_loader, opt, device)
             con, lam = 0.0, 0.0
         else:
-            # Margin warmup for arcface/cos head
             if hasattr(model, "cos_head"):
                 T_half = max(1, int(0.3 * epochs))
                 warm = min(1.0, (epoch / T_half) ** 2)
@@ -363,30 +324,28 @@ def main():
 
             if getattr(args, "arcface_only", False):
                 ce, con, lam = train_one_epoch(
-                        model, train_loader, opt, device, class_counts,
-                        base_lambda=0.0,
-                        epoch=epoch, total_epochs=epochs,
-                        mixup_alpha=0.0, mixup_prob=0.0,
-                        centers=None, per_class_center_w=None, lambda_center=0.0,
-                        center_sep=None, lambda_center_sep=0.0,
-                        temperature=0.12,
-                        diffusion_sampler=diffusion_model,
-                        synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
-                        margin_gate_delta=margin_gate_delta
-                    )
+                    model, train_loader, opt, device, class_counts,
+                    base_lambda=0.0, epoch=epoch, total_epochs=epochs,
+                    mixup_alpha=0.0, mixup_prob=0.0,
+                    centers=None, per_class_center_w=None, lambda_center=0.0,
+                    center_sep=None, lambda_center_sep=0.0,
+                    temperature=0.12,
+                    diffusion_sampler=diffusion_model,
+                    synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
+                    margin_gate_delta=margin_gate_delta
+                )
             else:
                 ce, con, lam = train_one_epoch(
-                        model, train_loader, opt, device, class_counts,
-                        base_lambda=0.5, epoch=epoch, total_epochs=epochs,
-                        mixup_alpha=0.4, mixup_prob=0.35,
-                        centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
-                        center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12,
-                        diffusion_sampler=diffusion_model,
-                        synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
-                        margin_gate_delta=margin_gate_delta
-                    )
+                    model, train_loader, opt, device, class_counts,
+                    base_lambda=0.5, epoch=epoch, total_epochs=epochs,
+                    mixup_alpha=0.4, mixup_prob=0.35,
+                    centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
+                    center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12,
+                    diffusion_sampler=diffusion_model,
+                    synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
+                    margin_gate_delta=margin_gate_delta
+                )
 
-        # Validation
         val = evaluate(model, val_loader, device)
         print(f"[{epoch:02d}] λ:{lam:.3f} CE:{ce:.4f} Con:{con:.4f} "
               f"Acc:{val['acc']:.3f} BalAcc:{val['bal_acc']:.3f} F1:{val['macro_f1']:.3f}")
@@ -402,7 +361,6 @@ def main():
             best_bal_acc = val["bal_acc"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
-        # === snapshot synthetic counts after each epoch ===
         if (not args.baseline):
             C = aug_stats["num_classes"]
             snap = [0] * C
@@ -452,9 +410,29 @@ def main():
                         centers.centers.detach().cpu().numpy())
     except Exception:
         pass
-    
-    
-       # ===== Export diffusion-generated embeddings (gated, unit-norm; optional unnorm) =====
+
+    try:
+        max_per_class = int((cfg.get("training", {}).get("plots", {}) or {}).get("train_embed_per_class", 400))
+        rng = np.random.default_rng(0)
+        y_tr_np = y_tr.astype(int)
+        idx_all = []
+        for c in np.unique(y_tr_np):
+            idx_c = np.where(y_tr_np == c)[0]
+            if len(idx_c) > max_per_class:
+                idx_c = rng.choice(idx_c, size=max_per_class, replace=False)
+            idx_all.append(idx_c)
+        idx_all = np.concatenate(idx_all)
+        sub_ds = torch.utils.data.Subset(PlainTSDataset(X_tr, y_tr), idx_all.tolist())
+        sub_loader = torch.utils.data.DataLoader(
+            sub_ds, batch_size=val_bs, shuffle=False, num_workers=0,
+            pin_memory=torch.cuda.is_available()
+        )
+        feats_tr, y_tr_sub = get_features(model, sub_loader, device)
+        np.save(os.path.join(results_dir, "train_feats.npy"), feats_tr)
+        np.save(os.path.join(results_dir, "train_y.npy"), y_tr_sub)
+    except Exception:
+        pass
+
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
@@ -465,88 +443,66 @@ def main():
                 export_per_class = int(diff_cfg.get("export_per_class", 300))
                 export_steps = int(diff_cfg.get("export_steps_infer", diff_steps_infer))
 
-                # raw sampler (supports margin_gate and never short-circuits for quotas)
                 sampler = getattr(diffusion_model, "ddim_sample_raw", diffusion_model.ddim_sample)
 
-                # ---- centers (optional for tighter gating)
                 centers_np = None
                 centers_path = os.path.join(results_dir, "centers.npy")
                 if os.path.exists(centers_path):
                     centers_np = np.load(centers_path)
 
                 def make_strict_gate(model, class_k: int, device="cuda",
-                                    delta_logit=0.10,        # margin to runner-up (scaled by s)
-                                    min_conf=0.65,           # min softmax prob for class k
-                                    normal_label=0,          # which label is Normal
-                                    centers_tensor=None,     # optional (C,D)
-                                    min_cos_to_k=0.70,       # keep if cos >= this to class-k center
-                                    max_cos_to_normal=0.40   # reject if cos >= this to Normal center
-                                    ):
-                    # cos_head.W is (C, D) -> normalize rows and transpose to (D, C)
-                    W = model.cos_head.W.to(device)                          # (C, D)
-                    W = torch.nn.functional.normalize(W, dim=1)              # normalize each class vector
-                    W_t = W.t()                                              # (D, C)
+                                     delta_logit=0.10, min_conf=0.65, normal_label=0,
+                                     centers_tensor=None, min_cos_to_k=0.70, max_cos_to_normal=0.40):
+                    W = model.cos_head.W.to(device)
+                    W = torch.nn.functional.normalize(W, dim=1)
+                    W_t = W.t()
                     s = float(getattr(model.cos_head, "s", 30.0))
 
                     Ck = Cn = None
                     if centers_tensor is not None:
-                        ct = torch.as_tensor(centers_tensor, dtype=torch.float32, device=device)  # (C, D)
+                        ct = torch.as_tensor(centers_tensor, dtype=torch.float32, device=device)
                         ct = torch.nn.functional.normalize(ct, dim=-1)
-                        if 0 <= class_k < ct.size(0):
-                            Ck = ct[class_k]  # (D,)
-                        if 0 <= normal_label < ct.size(0):
-                            Cn = ct[normal_label]  # (D,)
+                        if 0 <= class_k < ct.size(0): Ck = ct[class_k]
+                        if 0 <= normal_label < ct.size(0): Cn = ct[normal_label]
 
                     def gate(z, y):
-                        z = torch.nn.functional.normalize(z, dim=-1)         # (N, D)
-                        logits = s * (z @ W_t)                               # (N, C)
-                        probs  = torch.softmax(logits, dim=1)                # (N, C)
+                        z = torch.nn.functional.normalize(z, dim=-1)
+                        logits = s * (z @ W_t)
+                        probs  = torch.softmax(logits, dim=1)
                         top2   = torch.topk(logits, 2, dim=1).values
-
                         is_topk   = (logits.argmax(1) == class_k)
                         conf_ok   = (probs[:, class_k] >= min_conf)
                         margin_ok = (top2[:, 0] - top2[:, 1] >= s * delta_logit)
-
                         keep = is_topk & conf_ok & margin_ok
-                        if Ck is not None:
-                            keep = keep & ((z @ Ck) >= min_cos_to_k)
-                        if Cn is not None:
-                            keep = keep & ((z @ Cn) <= max_cos_to_normal)
+                        if Ck is not None: keep = keep & ((z @ Ck) >= min_cos_to_k)
+                        if Cn is not None: keep = keep & ((z @ Cn) <= max_cos_to_normal)
                         return keep
 
                     return gate
 
-
                 device = next(model.parameters()).device
 
                 def export_with_gate(fid: int, n_keep: int, steps: int,
-                                    chunk: int = 4096, max_rounds: int = 20):
+                                     chunk: int = 4096, max_rounds: int = 20):
 
                     def build_gate(delta_logit, min_conf, min_cos_to_k, max_cos_to_normal):
                         return make_strict_gate(
                             model, class_k=fid, device=device,
-                            delta_logit=delta_logit,
-                            min_conf=min_conf,
-                            normal_label=0,
-                            centers_tensor=centers_np,          # keep this if you saved centers.npy
-                            min_cos_to_k=min_cos_to_k,
-                            max_cos_to_normal=max_cos_to_normal
+                            delta_logit=delta_logit, min_conf=min_conf,
+                            normal_label=0, centers_tensor=centers_np,
+                            min_cos_to_k=min_cos_to_k, max_cos_to_normal=max_cos_to_normal
                         )
 
-                    # 1) start strict
                     settings = [
                         dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30),
-                        # 2) medium
                         dict(delta_logit=0.12, min_conf=0.70, min_cos_to_k=0.70, max_cos_to_normal=0.40),
-                        # 3) lenient (last resort)
-                        dict(delta_logit=0.08, min_conf=0.55, min_cos_to_k=0.55, max_cos_to_normal=0.55),
+                        dict(delta_logit=0.08,  min_conf=0.55, min_cos_to_k=0.55, max_cos_to_normal=0.55),
                     ]
 
                     kept = None
                     for si, s in enumerate(settings, 1):
                         gate = build_gate(**s)
-                        buf = []
-                        rounds = 0
+                        buf, rounds = [], 0
                         while sum(t.size(0) for t in buf) < n_keep and rounds < max_rounds:
                             rounds += 1
                             k = min(chunk, n_keep - sum(t.size(0) for t in buf))
@@ -554,7 +510,6 @@ def main():
                             Zprop  = sampler(y=y_prop, n=k, steps=steps, margin_gate=gate)
                             if Zprop is not None and Zprop.numel():
                                 buf.append(Zprop.detach().cpu())
-
                         tot = sum(t.size(0) for t in buf)
                         if tot > 0:
                             kept = torch.cat(buf, dim=0)[:n_keep]
@@ -564,30 +519,24 @@ def main():
                             print(f"[EXPORT] fault {fid}: kept 0 with gate setting #{si}, relaxing...")
 
                     if kept is None:
-                        print(f"[EXPORT] fault {fid}: FAILED to keep any samples after all gate settings.")
-                        return torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
+                        y_prop = torch.full((n_keep,), fid, dtype=torch.long, device=device)
+                        Zprop  = sampler(y=y_prop, n=n_keep, steps=steps, margin_gate=None)
+                        kept   = Zprop.detach().cpu()
+                        print(f"[EXPORT] fault {fid}: bypassed gate, kept {kept.size(0)} / {n_keep}")
 
                     return kept
-
-
-      
-
-
 
                 merged = {}
                 for fid in sel_faults:
                     Zfid = export_with_gate(fid=fid, n_keep=export_per_class, steps=export_steps)
                     arr = Zfid.numpy()
-                    # Save unit-norm (decision-space) version
                     np.save(os.path.join(results_dir, f"gen_f{fid}.npy"), arr)
                     merged[str(fid)] = arr
                     print(f"[OK] Saved gated gen_f{fid}.npy (shape={arr.shape})")
 
-                # Combined dict for convenience
                 np.save(os.path.join(results_dir, "gen_selected.npy"), merged, allow_pickle=True)
                 print(f"[OK] Saved gen_selected.npy for faults {sel_faults}")
 
-                # ---- OPTIONAL: also save UNnormalized version using radius rescale if available
                 if hasattr(diffusion_model, "rescale_to_real_radii"):
                     merged_un = {}
                     for fid in sel_faults:
@@ -601,9 +550,6 @@ def main():
 
     except Exception as e:
         print(f"[WARN] Could not export diffusion embeddings: {e}")
-
-
-
 
 if __name__ == "__main__":
     main()
