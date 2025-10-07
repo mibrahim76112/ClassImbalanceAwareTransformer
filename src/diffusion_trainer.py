@@ -307,7 +307,7 @@ def train_decision_diffusion_streaming(
         classes = uniq.tolist()
         req = {int(c): int(k) for c, k in zip(classes, req_cnts.tolist())}
 
-        # Cap by remaining quota
+      
         cap_map = {}
         for c in classes:
             allowed = max(0, int(quota[c]))
@@ -321,7 +321,7 @@ def train_decision_diffusion_streaming(
         _ = _generate_for_cap_map(cap_map, margin_gate)
         return torch.empty(0, ddm.feat_dim, device=device)
 
-    # install the quota-enforcing wrapper
+
     ddm.ddim_sample = ddim_sample
     ddm._gen_counter = gen_counter
     ddm._quota = quota

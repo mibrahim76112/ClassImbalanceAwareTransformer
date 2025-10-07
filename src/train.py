@@ -200,7 +200,6 @@ def main():
             persistent_workers=True, prefetch_factor=2
         )
 
-    # VAL/TEST loaders: set workers to 0 (light)
     val_loader = torch.utils.data.DataLoader(
         PlainTSDataset(X_val, y_val), batch_size=val_bs, shuffle=False,
         num_workers=0, pin_memory=use_pin_memory
@@ -236,7 +235,7 @@ def main():
             margin_type=str(cfg["model"]["margin_type"])
         ).to(device)
 
-        # per-class margin targets (will be warmed up each epoch)
+        
         per_m = torch.full((num_classes,), float(cfg["model"]["m"]), device=device)
         for k, v in (cfg.get("model", {}).get("per_class_margin_overrides", {}) or {}).items():
             idx = int(k)
@@ -279,16 +278,15 @@ def main():
         diff_width = int(diff_cfg.get("width", 512))
         diff_depth = int(diff_cfg.get("depth", 3))
         margin_gate_delta = float(diff_cfg.get("margin_gate_delta", 0.05))
-        autobalance = bool(diff_cfg.get("autobalance", True))  # NEW: default on
+        autobalance = bool(diff_cfg.get("autobalance", True)) 
 
-        diffusion_model = None   # will be trained later if enabled
+        diffusion_model = None   
 
-    # ---- Augmentation accounting
-    gen_counter = defaultdict(int)                 # per-epoch accumulation hook
-    aug_stats = {"per_epoch_synth_counts": [],     # list of lists, length = num_classes
+
+    gen_counter = defaultdict(int)                 
+    aug_stats = {"per_epoch_synth_counts": [],     
                  "num_classes": int(y_train.max()) + 1}
 
-    # ---- Quota for exact “balance to majority” (NEW)
     train_counts = np.bincount(y_train.astype(int), minlength=int(y_train.max()) + 1)
     majority = int(train_counts.max())
     quota = {int(c): int(max(0, majority - cnt)) for c, cnt in enumerate(train_counts.tolist())}
@@ -310,7 +308,6 @@ def main():
             print("[Diffusion] Training decision-space diffusion (streaming)...")
             model.eval()
 
-            # Real-only, single-view dataset for feature extraction (no augments)
             feat_loader = torch.utils.data.DataLoader(
                 PlainTSDataset(X_tr, y_tr),
                 batch_size=val_bs,
@@ -338,7 +335,7 @@ def main():
                 log_every=200,
                 gen_counter=gen_counter,
                 quota=quota,
-                auto_balance_to_majority=autobalance,   # <--- AUTO BALANCE
+                auto_balance_to_majority=autobalance,   
             )
 
             model.train()
@@ -403,7 +400,7 @@ def main():
             best_bal_acc = val["bal_acc"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
-        # === snapshot synthetic counts after each epoch ===
+  
         if (not args.baseline):
             C = aug_stats["num_classes"]
             snap = [0] * C
@@ -417,7 +414,7 @@ def main():
         model.load_state_dict(best_state)
         torch.save(best_state, os.path.join(results_dir, "best_state_dict.pt"))
 
-       # ---- TEST (best regular) ----
+     
     print("=== TEST (best regular) ===")
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
@@ -429,7 +426,7 @@ def main():
 
     try:
         y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
-                # ---- Per-class accuracy (recall) ----
+          
         num_classes = int(np.max(y_true)) + 1
         per_class_acc = {}
 
@@ -437,18 +434,17 @@ def main():
             mask = (y_true == c)
             n_c = int(mask.sum())
             if n_c == 0:
-                acc_c = float("nan")  # no samples of this class in test set
+                acc_c = float("nan") 
             else:
                 acc_c = float((y_pred[mask] == c).sum() / n_c)
             per_class_acc[c] = acc_c
             print(f"[ACC][class {c:02d}] {acc_c*100:.2f}% (n={n_c})")
 
-        # Optional summaries
         valid = [v for v in per_class_acc.values() if np.isfinite(v)]
         if valid:
             print(f"[ACC][macro-avg over {len(valid)} classes] {100*np.mean(valid):.2f}%")
 
-        # Save as JSON and CSV
+       
         with open(os.path.join(results_dir, "per_class_acc.json"), "w") as f:
             json.dump({str(k): float(v) for k, v in per_class_acc.items()}, f, indent=2)
 
@@ -460,7 +456,7 @@ def main():
                 f.write(f"{c},{'' if not np.isfinite(v) else f'{100*v:.4f}'}," \
                         f"{n_c}\n")
 
-        # <<< paste the snippet here >>>
+       
         np.save(os.path.join(results_dir, "test_y.npy"), y_true)
         np.save(os.path.join(results_dir, "test_pred_reg.npy"), y_pred)
         np.save(os.path.join(results_dir, "test_logits_reg.npy"), logits)
@@ -489,7 +485,7 @@ def main():
         pass
     
     
-       # ===== Export diffusion-generated embeddings (gated, unit-norm; optional unnorm) =====
+    
     try:
         if (not args.baseline) and use_diffusion and (diffusion_model is not None):
             diff_cfg = (cfg.get("training", {}).get("diffusion", {}) or {})
@@ -500,10 +496,10 @@ def main():
                 export_per_class = int(diff_cfg.get("export_per_class", 300))
                 export_steps = int(diff_cfg.get("export_steps_infer", diff_steps_infer))
 
-                # raw sampler (supports margin_gate and never short-circuits for quotas)
+                
                 sampler = getattr(diffusion_model, "ddim_sample_raw", diffusion_model.ddim_sample)
 
-                # ---- centers (optional for tighter gating)
+             
                 centers_np = None
                 centers_path = os.path.join(results_dir, "centers.npy")
                 if os.path.exists(centers_path):
@@ -552,35 +548,57 @@ def main():
 
 
                 device = next(model.parameters()).device
+                
+                HARD_CLASSES = {15}           
+                EXTRA_MAX_ROUNDS = 120        
 
                 def export_with_gate(fid: int, n_keep: int, steps: int,
                                     chunk: int = 8192, max_rounds: int = 40):
-                    def build_gate(delta_logit, min_conf, min_cos_to_k, max_cos_to_normal):
+                    """
+                    Try increasingly lenient gates until we keep n_keep samples.
+                    Special-case 'hard' classes with more leniency and more rounds.
+                    """
+                    local_max_rounds = EXTRA_MAX_ROUNDS if fid in HARD_CLASSES else max_rounds
+
+                    def build_gate(delta_logit, min_conf, min_cos_to_k, max_cos_to_normal, use_centers=True):
+                       
+                        centers_arg = centers_np if (use_centers and centers_np is not None) else None
                         return make_strict_gate(
                             model, class_k=fid, device=device,
                             delta_logit=delta_logit,
                             min_conf=min_conf,
                             normal_label=0,
-                            centers_tensor=centers_np,
+                            centers_tensor=centers_arg,
                             min_cos_to_k=min_cos_to_k,
                             max_cos_to_normal=max_cos_to_normal
                         )
 
+                
                     settings = [
-                                dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30),  # strict
-                                dict(delta_logit=0.10, min_conf=0.60, min_cos_to_k=0.60, max_cos_to_normal=0.50),  # medium
-                                dict(delta_logit=0.06, min_conf=0.50, min_cos_to_k=0.45, max_cos_to_normal=0.65),  # lenient+
-                                dict(delta_logit=0.05, min_conf=0.45, min_cos_to_k=0.45, max_cos_to_normal=0.65),
-                            ]
+                        dict(delta_logit=0.15, min_conf=0.75, min_cos_to_k=0.80, max_cos_to_normal=0.30, use_centers=True),  # strict
+                        dict(delta_logit=0.10, min_conf=0.60, min_cos_to_k=0.60, max_cos_to_normal=0.50, use_centers=True),  # medium
+                        dict(delta_logit=0.06, min_conf=0.50, min_cos_to_k=0.45, max_cos_to_normal=0.65, use_centers=True),  # lenient+
+                        dict(delta_logit=0.05, min_conf=0.45, min_cos_to_k=0.45, max_cos_to_normal=0.65, use_centers=True),
 
+                  
+                        dict(delta_logit=0.04, min_conf=0.42, min_cos_to_k=0.40, max_cos_to_normal=0.70, use_centers=False),
+                        dict(delta_logit=0.03, min_conf=0.38, min_cos_to_k=0.35, max_cos_to_normal=0.75, use_centers=False),
+                        dict(delta_logit=0.02, min_conf=0.32, min_cos_to_k=0.25, max_cos_to_normal=0.85, use_centers=False),
 
+               
+                        dict(delta_logit=0.00, min_conf=0.00, min_cos_to_k=-1.00, max_cos_to_normal=1.00, use_centers=False),
+                    ]
+
+                 
+                    if fid in HARD_CLASSES:
+                        settings = settings[2:]  
 
                     kept = None
                     for si, s in enumerate(settings, 1):
                         gate = build_gate(**s)
                         buf = []
                         rounds = 0
-                        while sum(t.size(0) for t in buf) < n_keep and rounds < max_rounds:
+                        while sum(t.size(0) for t in buf) < n_keep and rounds < local_max_rounds:
                             rounds += 1
                             k = min(chunk, n_keep - sum(t.size(0) for t in buf))
                             y_prop = torch.full((k,), fid, dtype=torch.long, device=device)
@@ -596,15 +614,35 @@ def main():
                         else:
                             print(f"[EXPORT] fault {fid}: kept 0 with gate setting #{si}, relaxing...")
 
+                    
                     if kept is None:
-                        print(f"[EXPORT] fault {fid}: FAILED to keep any samples after all gate settings.")
-                        return torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
+                        print(f"[EXPORT] fault {fid}: trying emergency fallback (no in-sampler gate).")
+                        buf = []
+                        rounds = 0
+                        while sum(t.size(0) for t in buf) < n_keep and rounds < (local_max_rounds * 2):
+                            rounds += 1
+                            k = min(chunk, n_keep - sum(t.size(0) for t in buf))
+                            y_prop = torch.full((k,), fid, dtype=torch.long, device=device)
+                            Zprop  = sampler(y=y_prop, n=k, steps=steps, margin_gate=None)  # no gate
+                            if Zprop is not None and Zprop.numel():
+                               
+                                W = F.normalize(model.cos_head.W.to(Zprop.device), dim=1).t()  # (D, C)
+                                s = float(getattr(model.cos_head, "s", 30.0))
+                                logits = s * (F.normalize(Zprop, dim=-1) @ W)
+                                choose = (logits.argmax(1) == fid)
+                                Zok = Zprop[choose]
+                                if Zok.numel():
+                                    buf.append(Zok.detach().cpu())
+
+                        tot = sum(t.size(0) for t in buf)
+                        if tot > 0:
+                            kept = torch.cat(buf, dim=0)[:n_keep]
+                            print(f"[EXPORT][fallback] fault {fid}: kept {kept.size(0)} / {n_keep}")
+                        else:
+                            print(f"[EXPORT] fault {fid}: FAILED to keep any samples after fallback.")
+                            return torch.empty((0, diffusion_model.feat_dim), dtype=torch.float32)
 
                     return kept
-
-
-      
-
 
 
                 merged = {}
@@ -616,11 +654,11 @@ def main():
                     merged[str(fid)] = arr
                     print(f"[OK] Saved gated gen_f{fid}.npy (shape={arr.shape})")
 
-                # Combined dict for convenience
+              
                 np.save(os.path.join(results_dir, "gen_selected.npy"), merged, allow_pickle=True)
                 print(f"[OK] Saved gen_selected.npy for faults {sel_faults}")
 
-                # ---- OPTIONAL: also save UNnormalized version using radius rescale if available
+          
                 if hasattr(diffusion_model, "rescale_to_real_radii"):
                     merged_un = {}
                     for fid in sel_faults:

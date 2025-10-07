@@ -240,9 +240,7 @@ def summarize_metrics(y_true, y_pred):
         "macro_f1": f1_score(y_true, y_pred, average="macro"),
     }
 
-# =========================
-# NEW: Diffusion balancing plots
-# =========================
+
 def plot_real_vs_diffusion_counts(train_counts, synth_counts,
                                   save_path="results/diffusion_balance_counts.png"):
     """
@@ -386,7 +384,7 @@ def plot_tsne_normal_fault6_generated(
         keep = d2 <= thr
         if keep.any():
             return X[keep]
-        # if everything filtered, return original to avoid empty
+        
         return X
 
     if align_gen and G.size and Xf.size:
@@ -422,7 +420,6 @@ def plot_tsne_normal_fault6_generated(
         perplexity=perp,
         early_exaggeration=16.0,
         learning_rate=100,
-        n_iter=1000,
         random_state=seed,
     ).fit_transform(X_all)
 
@@ -530,7 +527,6 @@ def plot_tsne_triplet(
         perplexity=perp,
         early_exaggeration=16.0,
         learning_rate=100,
-        n_iter=1000,
         random_state=seed,
     ).fit_transform(X_all)
 
