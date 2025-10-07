@@ -417,6 +417,7 @@ def main():
         model.load_state_dict(best_state)
         torch.save(best_state, os.path.join(results_dir, "best_state_dict.pt"))
 
+       # ---- TEST (best regular) ----
     print("=== TEST (best regular) ===")
     test_m = evaluate(model, test_loader, device)
     pretty_print_metrics("TEST", test_m)
@@ -428,11 +429,44 @@ def main():
 
     try:
         y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
+                # ---- Per-class accuracy (recall) ----
+        num_classes = int(np.max(y_true)) + 1
+        per_class_acc = {}
+
+        for c in range(num_classes):
+            mask = (y_true == c)
+            n_c = int(mask.sum())
+            if n_c == 0:
+                acc_c = float("nan")  # no samples of this class in test set
+            else:
+                acc_c = float((y_pred[mask] == c).sum() / n_c)
+            per_class_acc[c] = acc_c
+            print(f"[ACC][class {c:02d}] {acc_c*100:.2f}% (n={n_c})")
+
+        # Optional summaries
+        valid = [v for v in per_class_acc.values() if np.isfinite(v)]
+        if valid:
+            print(f"[ACC][macro-avg over {len(valid)} classes] {100*np.mean(valid):.2f}%")
+
+        # Save as JSON and CSV
+        with open(os.path.join(results_dir, "per_class_acc.json"), "w") as f:
+            json.dump({str(k): float(v) for k, v in per_class_acc.items()}, f, indent=2)
+
+        with open(os.path.join(results_dir, "per_class_acc.csv"), "w") as f:
+            f.write("class,acc,counts\n")
+            for c in range(num_classes):
+                n_c = int((y_true == c).sum())
+                v = per_class_acc[c]
+                f.write(f"{c},{'' if not np.isfinite(v) else f'{100*v:.4f}'}," \
+                        f"{n_c}\n")
+
+        # <<< paste the snippet here >>>
         np.save(os.path.join(results_dir, "test_y.npy"), y_true)
         np.save(os.path.join(results_dir, "test_pred_reg.npy"), y_pred)
         np.save(os.path.join(results_dir, "test_logits_reg.npy"), logits)
     except Exception:
         pass
+
 
     try:
         np.save(os.path.join(results_dir, "y_train.npy"), y_train)
