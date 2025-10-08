@@ -86,16 +86,15 @@ def train_decision_diffusion_streaming(
     if gen_counter is None:
         gen_counter = defaultdict(int)
 
-    # normalize quota to defaultdict(int)
+ 
     if quota is None:
-        quota_dd = defaultdict(lambda: 10**12)  # effectively infinite if not provided
+        quota_dd = defaultdict(lambda: 10**12)  
     else:
         quota_dd = defaultdict(int)
         for k, v in quota.items():
             quota_dd[int(k)] = int(v)
     quota = quota_dd
 
-    # --- NEW: radius bank (list of lists of floats), filled during training
     radius_bank = [ [] for _ in range(num_classes) ]
 
     step = 0
@@ -106,26 +105,24 @@ def train_decision_diffusion_streaming(
             yb = yb.to(device, non_blocking=True)
 
             with torch.no_grad():
-                fb = model.forward_features(xb)            # raw features
+                fb = model.forward_features(xb)           
                 if use_project and hasattr(model, "project"):
                     fb = model.project(fb)
 
-                # --- collect raw radii per class (before normalization)
+      
                 rb = torch.norm(fb, dim=-1)                # (B,)
                 for r_val, y_val in zip(rb.detach().cpu(), yb.detach().cpu()):
                     radius_bank[int(y_val)].append(float(r_val))
 
-                # normalized features used for diffusion loss (same as before)
-                zb = F.normalize(fb, dim=-1)               # (B, D)
+                zb = F.normalize(fb, dim=-1)              
 
-            # Lazy-init diffusion on first real batch
+          
             if ddm is None:
                 D = zb.shape[1] if feat_dim is None else int(feat_dim)
                 ddm = DecisionSpaceDiffusion(D, num_classes, T=T, num_steps_infer=steps_infer,
                                              width=width, depth=depth).to(device)
                 opt = torch.optim.AdamW(ddm.parameters(), lr=lr, weight_decay=1e-4)
 
-            # Micro-batch to prevent OOM
             B = zb.size(0)
             mb = min(microbatch, B)
             for i in range(0, B, mb):
@@ -148,11 +145,9 @@ def train_decision_diffusion_streaming(
 
     ddm.eval()
 
-    # Save the original sampler and expose it (unrestricted) for offline export if desired.
     _orig_ddim_sample = ddm.ddim_sample
     ddm.ddim_sample_raw = _orig_ddim_sample  # exposed raw sampler (no quotas/margin gate here)
 
-    # --- NEW: attach radius bank tensors to ddm
     try:
         ddm._radius_bank = [
             torch.tensor(r, dtype=torch.float32) if len(r) else torch.tensor([], dtype=torch.float32)
@@ -161,7 +156,7 @@ def train_decision_diffusion_streaming(
     except Exception:
         ddm._radius_bank = []
 
-    # --- NEW: helper to rescale unit vectors to empirical radii
+
     @torch.no_grad()
     def _rescale_to_real_radii(z_unit: torch.Tensor, y: torch.Tensor):
         """
@@ -170,7 +165,7 @@ def train_decision_diffusion_streaming(
         """
         bank = getattr(ddm, "_radius_bank", None)
         if not bank or len(bank) == 0:
-            return z_unit  # fallback: nothing to do
+            return z_unit  
         N = z_unit.size(0)
         radii = torch.empty(N, device=z_unit.device, dtype=z_unit.dtype)
         for c in torch.unique(y).tolist():

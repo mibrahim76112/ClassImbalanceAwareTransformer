@@ -3,7 +3,6 @@ import pandas as pd
 import pyreadr
 from pathlib import Path
 
-# NEW: read optional slice settings directly from config.yaml if present
 import yaml
 
 try:
@@ -74,7 +73,6 @@ def sample_train_and_test(
     post_fault_start: int = 100,
     train_runs=range(1, 25),
     test_runs=range(26, 38),
-    # NEW: normal (fault=0) slice controls
     normal_train_start: int = 0,
     normal_train_end: int = 42000,
     normal_test_start: int = 42000,
@@ -172,7 +170,6 @@ def load_sampled_data(*,
                       post_fault_start=100,
                       train_runs=range(1, 25),
                       test_runs=range(26, 38),
-                      # NEW: allow caller to pass slices; if None, try config; else defaults
                       normal_train_start: int = None,
                       normal_train_end: int = None,
                       normal_test_start: int = None,

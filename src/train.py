@@ -518,9 +518,9 @@ def main():
                             Cn = ct[normal_label]  # (D,)
 
                     def gate(z, y):
-                        z = torch.nn.functional.normalize(z, dim=-1)         # (N, D)
-                        logits = s * (z @ W_t)                               # (N, C)
-                        probs  = torch.softmax(logits, dim=1)                # (N, C)
+                        z = torch.nn.functional.normalize(z, dim=-1)         
+                        logits = s * (z @ W_t)                               
+                        probs  = torch.softmax(logits, dim=1)                
                         top2   = torch.topk(logits, 2, dim=1).values
 
                         is_topk   = (logits.argmax(1) == class_k)
