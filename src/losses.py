@@ -73,6 +73,7 @@ def latent_mixup(feats, y, num_classes, alpha=0.4):
     y_perm = F.one_hot(y[idx], num_classes=num_classes).float()
     y_soft = lam.view(B, 1) * y_one + (1 - lam).view(B, 1) * y_perm
     return feats_mix, y_soft
+
 def train_one_epoch(
     model, loader, optimizer, device, class_counts,
     tau_la=1.0, base_lambda=0.5, temperature=0.12,
@@ -80,7 +81,8 @@ def train_one_epoch(
     mixup_alpha=0.4, mixup_prob=0.35,
     centers=None, per_class_center_w=None, lambda_center=0.010,
     center_sep=None, lambda_center_sep=0.010,
-    diffusion_sampler=None, synth_ratio=0.0, margin_gate_delta=0.05
+    diffusion_sampler=None, synth_ratio=0.0, margin_gate_delta=0.05,
+    syn_log: bool = False,   # <-- NEW: logging toggle (default off)
 ):
     """
     - SupCon/center losses: REAL features only
@@ -174,10 +176,12 @@ def train_one_epoch(
                         syn_hist[v] += int(c)
 
                     syn_kept_tot += kept
-                    print(f"[SYN][train] kept {kept}/{Ns} this step; classes="
-                          f"{ {int(v): int(c) for v,c in zip(vals.tolist(), counts.tolist())} }")
+                    if syn_log:
+                        print(f"[SYN][train] kept {kept}/{Ns} this step; classes="
+                              f"{ {int(v): int(c) for v,c in zip(vals.tolist(), counts.tolist())} }")
                 else:
-                    print(f"[SYN][train] kept 0/{Ns} this step")
+                    if syn_log:
+                        print(f"[SYN][train] kept 0/{Ns} this step")
 
         # --- CE loss (REAL + optional SYNTH) ---
         if use_mix:
@@ -194,10 +198,10 @@ def train_one_epoch(
             else:
                 loss_ce = loss_ce_real
         else:
-            # Standard CE on REAL…
+     
             logits_real = model.cos_head(feats_w, y=y, use_margin=True)
             if Z_synth is not None:
-                # …concatenated with CE on SYNTHETIC
+            
                 logits_syn = model.cos_head(Z_synth, y=y_synth, use_margin=True)
                 logits_all = torch.cat([logits_real, logits_syn], dim=0)
                 y_all      = torch.cat([y,           y_synth   ], dim=0)
@@ -205,7 +209,6 @@ def train_one_epoch(
             else:
                 loss_ce = ce_loss_fn(logits_real, y)
 
-        # --- Center & separation losses (REAL features only) ---
         loss_center_term = 0.0
         if centers is not None:
             with torch.no_grad():
@@ -216,7 +219,7 @@ def train_one_epoch(
         if (center_sep is not None) and (centers is not None):
             loss_center_sep_term = center_sep(centers.centers)
 
-        # --- Total & step ---
+    
         loss = (loss_ce
                 + lambda_supcon * loss_con
                 + lambda_center * loss_center_term
@@ -232,7 +235,7 @@ def train_one_epoch(
         n_obs   += B
 
     # ---- epoch summary for synthetics ----
-    if syn_proposed_tot > 0:
+    if syn_log and syn_proposed_tot > 0:
         try:
             _hist_list = syn_hist.tolist()
         except Exception:

@@ -433,22 +433,7 @@ def main():
         y_true, y_pred, logits = get_preds_and_logits(model, test_loader, device)
           
         num_classes = int(np.max(y_true)) + 1
-        per_class_acc = {}
-
-        for c in range(num_classes):
-            mask = (y_true == c)
-            n_c = int(mask.sum())
-            if n_c == 0:
-                acc_c = float("nan") 
-            else:
-                acc_c = float((y_pred[mask] == c).sum() / n_c)
-            per_class_acc[c] = acc_c
-            print(f"[ACC][class {c:02d}] {acc_c*100:.2f}% (n={n_c})")
-
-        valid = [v for v in per_class_acc.values() if np.isfinite(v)]
-        if valid:
-            print(f"[ACC][macro-avg over {len(valid)} classes] {100*np.mean(valid):.2f}%")
-
+        
        
         with open(os.path.join(results_dir, "per_class_acc.json"), "w") as f:
             json.dump({str(k): float(v) for k, v in per_class_acc.items()}, f, indent=2)
@@ -654,7 +639,7 @@ def main():
                 for fid in sel_faults:
                     Zfid = export_with_gate(fid=fid, n_keep=export_per_class, steps=export_steps)
                     arr = Zfid.numpy()
-                    # Save unit-norm (decision-space) version
+                    
                     np.save(os.path.join(results_dir, f"gen_f{fid}.npy"), arr)
                     merged[str(fid)] = arr
                     print(f"[OK] Saved gated gen_f{fid}.npy (shape={arr.shape})")

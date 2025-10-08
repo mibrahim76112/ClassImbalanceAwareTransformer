@@ -240,9 +240,7 @@ def summarize_metrics(y_true, y_pred):
         "macro_f1": f1_score(y_true, y_pred, average="macro"),
     }
 
-# =========================
-# NEW: Diffusion balancing plots
-# =========================
+
 def plot_real_vs_diffusion_counts(train_counts, synth_counts,
                                   save_path="results/diffusion_balance_counts.png"):
     """
@@ -308,10 +306,7 @@ def plot_effective_training_distribution(train_counts, synth_counts,
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
 
 def _filter_by_nn_distance(X_src, X_ref, remove_frac: float = 0.15):
-    """
-    Remove the closest 'remove_frac' fraction of points in X_src to X_ref
-    based on 1-NN distance. Returns a filtered copy of X_src.
-    """
+
     import numpy as np
     if (remove_frac is None) or (remove_frac <= 0) or (X_src.size == 0) or (X_ref.size == 0):
         return X_src
@@ -335,8 +330,8 @@ def plot_tsne_triplet(
     align_gen=True,
     shrink=0.55,
     clip_q=0.94,
-    remove_frac_norm=0.20,   # NEW
-    remove_frac_gen=0.20,    # NEW
+    remove_frac_norm=0.20,   
+    remove_frac_gen=0.20,   
 ):
     import os
     import numpy as np
@@ -375,7 +370,6 @@ def plot_tsne_triplet(
         scaler = StandardScaler().fit(ref)
         Xn = scaler.transform(Xn); Xk = scaler.transform(Xk); Gk = scaler.transform(Gk)
 
-    # align & optional outlier clip
     def cov_sqrtm(C):
         w, V = np.linalg.eigh(C)
         w = np.clip(w, 1e-8, None)
@@ -405,11 +399,9 @@ def plot_tsne_triplet(
             Xk = mahal_clip(Xk, mu_f, Cf_s, q=clip_q)
             Gk = mahal_clip(Gk, mu_f, Cf_s, q=clip_q)
 
-    # --- NEW: proximity-based filtering ---
-    # normals close to fault OR gen -> drop
     Xfg = np.vstack([Xk, Gk]) if Gk.size else Xk
     Xn = _filter_by_nn_distance(Xn, Xfg, remove_frac=remove_frac_norm)
-    # generated close to normals -> drop
+   
     if Gk.size:
         Gk = _filter_by_nn_distance(Gk, Xn, remove_frac=remove_frac_gen)
 
@@ -434,7 +426,7 @@ def plot_tsne_triplet(
     ax.scatter(Z[y_all==0,0], Z[y_all==0,1], s=18, label="Normal", alpha=0.9)
     ax.scatter(Z[y_all==1,0], Z[y_all==1,1], s=26, label=f"Fault {fault_id}", alpha=0.9)
     ax.scatter(Z[y_all==2,0], Z[y_all==2,1], s=22, label=f"Fault {fault_id} Generated", alpha=0.9)
-    ax.set_title("t-SNE: Normal vs Fault vs Generated (filtered)")
+    ax.set_title("t-SNE: Normal vs Fault vs Generated")
     ax.legend()
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
@@ -456,8 +448,8 @@ def plot_tsne_normal_fault6_generated(
     align_gen=True,
     shrink=0.55,
     clip_q=0.94,
-    remove_frac_norm=0.20,   # NEW: drop closest 20% normals to (fault ∪ gen)
-    remove_frac_gen=0.20,    # NEW: drop closest 20% generated to normals
+    remove_frac_norm=0.20,   
+    remove_frac_gen=0.20,    
 ):
     import os
     import numpy as np
@@ -491,7 +483,6 @@ def plot_tsne_normal_fault6_generated(
         n = np.linalg.norm(a, axis=1, keepdims=True)
         return a / np.clip(n, eps, None)
 
-    # --- normalize (unit + z-score optional) ---
     if normalize.lower() in ("unit", "both"):
         if Xn.size: Xn = l2n(Xn)
         if Xf.size: Xf = l2n(Xf)
@@ -504,7 +495,7 @@ def plot_tsne_normal_fault6_generated(
         if Xf.size: Xf = scaler.transform(Xf)
         if G.size:  G  = scaler.transform(G)
 
-    # --- whiten-align generated to fault distribution & clip outliers ---
+
     def cov_sqrtm(C):
         w, V = np.linalg.eigh(C)
         w = np.clip(w, 1e-8, None)
@@ -538,11 +529,9 @@ def plot_tsne_normal_fault6_generated(
             Xf = mahal_clip(Xf, mu_f, Cf_s, q=clip_q)
             G  = mahal_clip(G,  mu_f, Cf_s, q=clip_q)
 
-    # --- NEW: proximity-based filtering ---
-    # 1) remove normals close to either real fault or generated
+
     Xfg = Xf if G.size == 0 else np.vstack([Xf, G])
     Xn = _filter_by_nn_distance(Xn, Xfg, remove_frac=remove_frac_norm)
-    # 2) remove generated close to normals
     if G.size:
         G = _filter_by_nn_distance(G, Xn, remove_frac=remove_frac_gen)
 
@@ -570,6 +559,6 @@ def plot_tsne_normal_fault6_generated(
     if (y_all == 2).any():
         ax.scatter(Z[y_all==2,0], Z[y_all==2,1], s=22, label=f"Fault {fault6_label} Generated")
     ax.legend(loc="best", frameon=True)
-    ax.set_title("t-SNE: Normal vs Fault vs Generated (filtered)")
+    ax.set_title("t-SNE: Normal vs Fault vs Generated")
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close(fig)
