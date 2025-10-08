@@ -73,8 +73,6 @@ def latent_mixup(feats, y, num_classes, alpha=0.4):
     y_perm = F.one_hot(y[idx], num_classes=num_classes).float()
     y_soft = lam.view(B, 1) * y_one + (1 - lam).view(B, 1) * y_perm
     return feats_mix, y_soft
-
-
 def train_one_epoch(
     model, loader, optimizer, device, class_counts,
     tau_la=1.0, base_lambda=0.5, temperature=0.12,
@@ -82,104 +80,132 @@ def train_one_epoch(
     mixup_alpha=0.4, mixup_prob=0.35,
     centers=None, per_class_center_w=None, lambda_center=0.010,
     center_sep=None, lambda_center_sep=0.010,
-    diffusion_sampler=None, synth_ratio=0.0, margin_gate_delta=0.05  # NEW
+    diffusion_sampler=None, synth_ratio=0.0, margin_gate_delta=0.05
 ):
+    """
+    - SupCon/center losses: REAL features only
+    - CE loss: REAL (+ optional SYNTHETIC embeddings from diffusion_sampler)
+    - Synthetic embeddings are generated in the decision space (z), so we feed them
+      directly to the cosine head (no encoder pass).
+    """
     model.train()
     ce_loss_fn = LogitAdjustedCrossEntropy(class_counts, tau=tau_la).to(device)
     supcon = WeightedSupConLoss(temperature, class_counts=class_counts).to(device)
 
-    # warm-up margin (0 -> m)
+    # ArcFace margin warmup
     if hasattr(model, "cos_head"):
         m_max = getattr(model.cos_head, "m", 0.15)
         t = min(1.0, epoch / max(1, total_epochs // 2))
         model.cos_head.m = float(m_max) * (t ** 2)
 
-    lambda_supcon = base_lambda * (epoch / 70)
+    lambda_supcon = base_lambda * (epoch / 70.0)
     num_classes = model.cos_head.W.size(0)
 
-    import numpy as _np
-    counts = _np.bincount(_np.arange(num_classes), minlength=num_classes)  # dummy to keep API stable
-    # We'll select minority classes dynamically from class_counts:
-    cc_np = _np.array(class_counts if len(class_counts) == num_classes else _np.pad(class_counts, (0, num_classes-len(class_counts))))
-    minority = [i for i,c in enumerate(cc_np) if c > 0 and c < cc_np.max()]
-
-    def margin_gate(z_hat, y):
-        # accept only if cos_y >= max_other + delta (delta ~ margin target)
-        with torch.no_grad():
-            logits = model.cos_head(z_hat, y=None, use_margin=False) / max(model.cos_head.s, 1.0)
-            tgt = logits[torch.arange(logits.size(0), device=logits.device), y]
-            logits[torch.arange(logits.size(0), device=logits.device), y] = -1e9
-            rival, _ = logits.max(dim=1)
-            ok = (tgt >= rival + margin_gate_delta)
-        return ok
+    # ---- DEBUG counters for synthetics ----
+    syn_proposed_tot = 0        # how many we asked sampler for (sum over steps)
+    syn_kept_tot = 0            # how many sampler actually returned (and we used)
+    syn_hist = torch.zeros(num_classes, dtype=torch.long)  # kept per-class
 
     ce_sum = con_sum = n_obs = 0
+
     for batch in loader:
-        # batch may be: (x, y)  OR  (x, y, xw, xs) depending on Dataset
+        # Unpack and move to device
         if isinstance(batch, (list, tuple)) and len(batch) >= 2:
             x = batch[0]
             y = batch[1]
         else:
             x, y = batch
-
-        # Move raw to device
-        x = x.to(device, non_blocking=True)        # shape (B, T, F)
+        x = x.to(device, non_blocking=True)        # (B, T, F)
         y = y.to(device, non_blocking=True)
+        B = y.size(0)
 
-        # If dataset already provided views (legacy path), keep them; else create on GPU now
+        # --- On-GPU weak/strong views (for SupCon) ---
         if isinstance(batch, (list, tuple)) and len(batch) == 4:
-            # Legacy path: dataset produced xw,xs (likely on CPU) — move them
             xw = batch[2].to(device, non_blocking=True)
             xs = batch[3].to(device, non_blocking=True)
         else:
-            # GPU-side augmentations (same params as before)
             weak_tfms   = [TSJitter(0.0005), TSScale(0.99, 1.01)]
-            strong_tfms = [TSJitter(0.001), TSScale(0.98, 1.02), TSTimeMask(0.10)]
-
+            strong_tfms = [TSJitter(0.001),  TSScale(0.98, 1.02), TSTimeMask(0.10)]
             xw = x
-            for t in weak_tfms:
-                xw = t(xw)  # runs on GPU
-
+            for tfn in weak_tfms:
+                xw = tfn(xw)
             xs = x
-            for t in strong_tfms:
-                xs = t(xs)  # runs on GPU
+            for tfn in strong_tfms:
+                xs = tfn(xs)
 
-        # --------- Synthetic mini-step (keep your diffusion block here, unchanged) ---------
-        if (diffusion_sampler is not None) and (synth_ratio > 0.0) and (torch.rand(1).item() < synth_ratio) and (len(minority) > 0):
-            Bsyn = min(128, xw.size(0))  # small synthetic step
-            ys = torch.tensor(_np.random.choice(minority, size=Bsyn), device=device).long()
+        # --- Forward features for REAL batch ---
+        feats_w = model.forward_features(xw)        # used for CE / centers
+        feats_s = model.forward_features(xs)        # second view for SupCon
 
-            # SAMPLE (no grad), then train head on synthetics (with grad)
-            with torch.no_grad():
-                z_syn = diffusion_sampler.ddim_sample(ys, n=Bsyn, steps=None, margin_gate=margin_gate)
-            if z_syn.numel() > 0:
-                ys = ys[:z_syn.size(0)]
-                z_syn = z_syn.to(device=device, dtype=next(model.parameters()).dtype)
-                logits_syn = model.cos_head(z_syn, y=ys, use_margin=True)
-                loss_syn = ce_loss_fn(logits_syn, ys)
-                optimizer.zero_grad(); loss_syn.backward(); optimizer.step()
-
-        # --------- REAL-BATCH PATH (unchanged below) ---------
-        feats_w = model.forward_features(xw)
-        feats_s = model.forward_features(xs)
-
+        # Project for SupCon; only REAL features participate
         z1 = model.project(feats_w)
         z2 = model.project(feats_s)
         loss_con = supcon(torch.cat([z1, z2], dim=0), y)
 
+        # --- Decide mixup on REAL path ---
         contains_hard = ((y == 15) | (y == 0)).any()
         mixup_prob_eff  = 0.80 if contains_hard else mixup_prob
         mixup_alpha_eff = 0.60 if contains_hard else mixup_alpha
         use_mix = (torch.rand(1).item() < mixup_prob_eff)
 
-        if use_mix:
-            feats_mix, y_mix = latent_mixup(feats_w, y, num_classes=num_classes, alpha=mixup_alpha_eff)
-            logits = model.cos_head(feats_mix, y=None, use_margin=False)
-            loss_ce = -(y_mix * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
-        else:
-            logits = model.cos_head(feats_w, y=y, use_margin=True)
-            loss_ce = ce_loss_fn(logits, y)
+        # --- OPTIONAL: sample synthetic embeddings (decision-space) ---
+        Z_synth = None
+        y_synth = None
+        if (diffusion_sampler is not None) and (synth_ratio is not None) and (synth_ratio > 0):
+            Ns = int(round(float(synth_ratio) * B))
+            if Ns > 0:
+                # sample target labels from this batch's labels to match its class mix
+                idx = torch.randint(0, B, (Ns,), device=device)
+                y_synth = y[idx]
+                syn_proposed_tot += Ns
 
+                # IMPORTANT: pass a RAW sampler here (see main train script)
+                with torch.no_grad():
+                    Z = diffusion_sampler(y=y_synth, n=Ns, steps=None, margin_gate=None)
+
+                if (Z is not None) and (Z.numel() > 0):
+                    Z_synth = F.normalize(Z.detach(), dim=-1)
+                    kept = int(Z_synth.size(0))
+                    y_synth = y_synth[:kept]
+
+                    # per-class kept stats
+                    vals, counts = torch.unique(y_synth.detach().cpu(), return_counts=True)
+                    for v, c in zip(vals.tolist(), counts.tolist()):
+                        syn_hist[v] += int(c)
+
+                    syn_kept_tot += kept
+                    print(f"[SYN][train] kept {kept}/{Ns} this step; classes="
+                          f"{ {int(v): int(c) for v,c in zip(vals.tolist(), counts.tolist())} }")
+                else:
+                    print(f"[SYN][train] kept 0/{Ns} this step")
+
+        # --- CE loss (REAL + optional SYNTH) ---
+        if use_mix:
+            # Mixup on REAL features (soft labels)
+            feats_mix, y_mix = latent_mixup(feats_w, y, num_classes=num_classes, alpha=mixup_alpha_eff)
+            logits_real = model.cos_head(feats_mix, y=None, use_margin=False)
+            loss_ce_real = -(y_mix * F.log_softmax(logits_real, dim=1)).sum(dim=1).mean()
+
+            # Plus CE on synthetic (hard labels) if available
+            if Z_synth is not None:
+                logits_syn = model.cos_head(Z_synth, y=y_synth, use_margin=True)
+                loss_ce_syn = ce_loss_fn(logits_syn, y_synth)
+                loss_ce = loss_ce_real + loss_ce_syn
+            else:
+                loss_ce = loss_ce_real
+        else:
+            # Standard CE on REAL…
+            logits_real = model.cos_head(feats_w, y=y, use_margin=True)
+            if Z_synth is not None:
+                # …concatenated with CE on SYNTHETIC
+                logits_syn = model.cos_head(Z_synth, y=y_synth, use_margin=True)
+                logits_all = torch.cat([logits_real, logits_syn], dim=0)
+                y_all      = torch.cat([y,           y_synth   ], dim=0)
+                loss_ce = ce_loss_fn(logits_all, y_all)
+            else:
+                loss_ce = ce_loss_fn(logits_real, y)
+
+        # --- Center & separation losses (REAL features only) ---
         loss_center_term = 0.0
         if centers is not None:
             with torch.no_grad():
@@ -190,6 +216,7 @@ def train_one_epoch(
         if (center_sep is not None) and (centers is not None):
             loss_center_sep_term = center_sep(centers.centers)
 
+        # --- Total & step ---
         loss = (loss_ce
                 + lambda_supcon * loss_con
                 + lambda_center * loss_center_term
@@ -199,10 +226,17 @@ def train_one_epoch(
         loss.backward()
         optimizer.step()
 
-        b = y.size(0)
-        ce_sum  += float(loss_ce.detach())  * b
-        con_sum += float(loss_con.detach()) * b
-        n_obs   += b
+        # Book-keeping
+        ce_sum  += float(loss_ce.detach())  * B
+        con_sum += float(loss_con.detach()) * B
+        n_obs   += B
 
+    # ---- epoch summary for synthetics ----
+    if syn_proposed_tot > 0:
+        try:
+            _hist_list = syn_hist.tolist()
+        except Exception:
+            _hist_list = [int(x) for x in syn_hist.cpu().numpy().tolist()]
+        print(f"[SYN][epoch] proposed={syn_proposed_tot}, kept={syn_kept_tot}; kept-per-class={_hist_list}")
 
     return ce_sum / max(1, n_obs), con_sum / max(1, n_obs), lambda_supcon

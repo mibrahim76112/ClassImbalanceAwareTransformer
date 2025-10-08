@@ -171,11 +171,12 @@ def main():
         k_neighbors = max(1, min(5, int(min_minority) - 1))
         print(f"[SMOTE] Upsampling minorities {target_descr}; k_neighbors={k_neighbors}")
 
-        N, T, F = X_tr.shape
-        X2d = X_tr.reshape(N, T * F).astype(np.float32)
-        sm = SMOTE(sampling_strategy=sampling_strategy, k_neighbors=k_neighbors, random_state=seed)
+        N, T, D = X_tr.shape
+        X2d = X_tr.reshape(N, T * D).astype(np.float32)
+        sm = SMOTE(...)
         X_res, y_res = sm.fit_resample(X2d, y_tr)
-        X_tr, y_tr = X_res.reshape(-1, T, F), y_res
+        X_tr, y_tr = X_res.reshape(-1, T, D), y_res
+
 
         use_weighted_sampler = False 
 
@@ -292,6 +293,8 @@ def main():
     quota = {int(c): int(max(0, majority - cnt)) for c, cnt in enumerate(train_counts.tolist())}
 
     # ---- Train
+    sampler_for_train = None
+
     best_bal_acc, best_state = 0.0, None
     history = {
         "epoch": [],
@@ -302,10 +305,12 @@ def main():
         "val_bal_acc": [],
         "val_macro_f1": []
     }
+    
     for epoch in range(1, epochs + 1):
 
         if (not args.baseline) and use_diffusion and (epoch == start_ep):
             print("[Diffusion] Training decision-space diffusion (streaming)...")
+            
             model.eval()
 
             feat_loader = torch.utils.data.DataLoader(
@@ -337,6 +342,7 @@ def main():
                 quota=quota,
                 auto_balance_to_majority=autobalance,   
             )
+            sampler_for_train = getattr(diffusion_model, "ddim_sample_raw", diffusion_model.ddim_sample)
 
             model.train()
 
@@ -361,17 +367,16 @@ def main():
 
             if getattr(args, "arcface_only", False):
                 ce, con, lam = train_one_epoch(
-                        model, train_loader, opt, device, class_counts,
-                        base_lambda=0.0,
-                        epoch=epoch, total_epochs=epochs,
-                        mixup_alpha=0.0, mixup_prob=0.0,
-                        centers=None, per_class_center_w=None, lambda_center=0.0,
-                        center_sep=None, lambda_center_sep=0.0,
-                        temperature=0.12,
-                        diffusion_sampler=diffusion_model,
-                        synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
-                        margin_gate_delta=margin_gate_delta
-                    )
+                                model, train_loader, opt, device, class_counts,
+                                base_lambda=0.5, epoch=epoch, total_epochs=epochs,
+                                mixup_alpha=0.4, mixup_prob=0.35,
+                                centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
+                                center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12,
+                                diffusion_sampler=sampler_for_train,        # <-- use RAW sampler here
+                                synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
+                                margin_gate_delta=margin_gate_delta
+                            )
+
             else:
                 ce, con, lam = train_one_epoch(
                         model, train_loader, opt, device, class_counts,
@@ -379,7 +384,7 @@ def main():
                         mixup_alpha=0.4, mixup_prob=0.35,
                         centers=centers, per_class_center_w=per_class_center_w, lambda_center=0.010,
                         center_sep=center_sep, lambda_center_sep=0.010, temperature=0.12,
-                        diffusion_sampler=diffusion_model,
+                        diffusion_sampler=sampler_for_train,
                         synth_ratio=(synth_ratio if (not args.baseline) and use_diffusion and (diffusion_model is not None) and (epoch >= start_ep) else 0.0),
                         margin_gate_delta=margin_gate_delta
                     )
